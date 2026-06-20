@@ -2,40 +2,45 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from dash import Input, Output, callback, dash_table
+from dash import Input, Output, dash_table
 from dash.exceptions import PreventUpdate
 
 from data.store import load
-from stats.bayesian import shrink_ts
-from stats.on_off import compute_on_off_deltas
+from stats.bayesian import shrink_shooting
 
 GOLD = "#f5a623"
 BLUE = "#4a90d9"
 GRAY = "#aaaaaa"
 
-
-def _load_player_agg() -> pd.DataFrame:
-    return load("player_agg")
+LEAGUE_AVG_TS = 0.545
 
 
-def _load_on_off() -> pd.DataFrame:
-    raw = load("on_off_raw")
-    if raw.empty:
-        return pd.DataFrame()
-    return compute_on_off_deltas(raw)
+def _load_advanced() -> pd.DataFrame:
+    df = load("player_advanced")
+    if df.empty:
+        return df
+    for col in ["G", "MP", "PER", "OWS", "DWS", "WS", "WS/40", "USG%", "ORtg", "DRtg"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 
-def _load_win_shares() -> pd.DataFrame:
-    return load("win_shares")
+def _load_totals() -> pd.DataFrame:
+    df = load("player_totals")
+    if df.empty:
+        return df
+    for col in ["G", "MP", "PTS", "FGA", "FTA", "FGM", "FTM", "AST", "TOV", "TRB"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 
-def _load_game_logs() -> pd.DataFrame:
-    return load("player_game_logs")
+def _load_per_game() -> pd.DataFrame:
+    return load("player_per_game")
 
 
 def register_callbacks(app) -> None:
 
-    # ── Routing ──────────────────────────────────────────────────────────────
     from dashboard.layout import league_layout, player_layout, team_layout
 
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
@@ -54,33 +59,46 @@ def register_callbacks(app) -> None:
         Input("league-min-gp", "value"),
     )
     def update_league(sort_col, min_gp):
-        ws = _load_win_shares()
-        agg = _load_player_agg()
-        on_off = _load_on_off()
+        adv = _load_advanced()
+        tot = _load_totals()
 
-        if ws.empty or agg.empty:
+        if adv.empty:
             return _empty_fig("No data yet — run the nightly refresh."), ""
 
-        # Merge win shares with on/off delta
-        df = ws.merge(agg[["PLAYER_ID", "GP", "FGA", "FTA", "PTS", "TOV"]], on="PLAYER_ID", how="left")
-        if not on_off.empty:
-            df = df.merge(on_off[["PLAYER_ID", "DELTA", "DELTA_CI_LOW", "DELTA_CI_HIGH"]],
-                          on="PLAYER_ID", how="left")
+        df = adv.copy()
+        df = df[df["G"] >= min_gp].copy()
 
-        # Bayesian TS%
-        ts = shrink_ts(df["PTS"], df["FGA"], df["FTA"])
-        df["TS_POSTERIOR"] = ts["posterior_mean"]
-        df["TS_CI_LOW"] = ts["ci_low_90"]
-        df["TS_CI_HIGH"] = ts["ci_high_90"]
+        # Bayesian TS% using season totals
+        if not tot.empty:
+            merged = df.merge(
+                tot[["Player", "Team", "PTS", "FGA", "FTA"]].rename(
+                    columns={"Player": "Player", "Team": "Team"}
+                ),
+                on=["Player", "Team"], how="left"
+            )
+            ts_raw = pd.to_numeric(df.get("TS%", pd.Series(dtype=float)), errors="coerce")
+            fga = pd.to_numeric(merged.get("FGA", pd.Series(dtype=float)), errors="coerce").fillna(0)
+            fta = pd.to_numeric(merged.get("FTA", pd.Series(dtype=float)), errors="coerce").fillna(0)
+            pts = pd.to_numeric(merged.get("PTS", pd.Series(dtype=float)), errors="coerce").fillna(0)
+            attempts = 2 * (fga + 0.44 * fta)
+            makes = pts / 2
+            ts_bayes = shrink_shooting(makes, attempts / 2, league_mean=LEAGUE_AVG_TS / 2)
+            df["TS_POSTERIOR"] = (ts_bayes["posterior_mean"] * 2).values
+            df["TS_CI_LOW"] = (ts_bayes["ci_low_90"] * 2).values
+            df["TS_CI_HIGH"] = (ts_bayes["ci_high_90"] * 2).values
+        else:
+            df["TS_POSTERIOR"] = pd.to_numeric(df.get("TS%"), errors="coerce")
+            df["TS_CI_LOW"] = df["TS_POSTERIOR"]
+            df["TS_CI_HIGH"] = df["TS_POSTERIOR"]
 
-        df = df[df["GP"] >= min_gp].sort_values(sort_col, ascending=False).head(30)
+        df = df.sort_values(sort_col, ascending=False).head(30)
 
-        if sort_col == "WIN_SHARES":
+        if sort_col == "WS":
             fig = _win_shares_chart(df)
         elif sort_col == "TS_POSTERIOR":
             fig = _ts_chart(df)
         else:
-            fig = _on_off_league_chart(df)
+            fig = _usage_efficiency_chart(df)
 
         table = _summary_table(df)
         return fig, table
@@ -88,12 +106,14 @@ def register_callbacks(app) -> None:
     # ── Player view ───────────────────────────────────────────────────────────
     @app.callback(Output("player-select", "options"), Input("url", "pathname"))
     def populate_player_dropdown(_):
-        agg = _load_player_agg()
-        if agg.empty:
+        adv = _load_advanced()
+        if adv.empty:
             return []
-        return [{"label": f"{r['PLAYER_NAME']} ({r['TEAM_ABBREVIATION']})",
-                 "value": r["PLAYER_ID"]}
-                for _, r in agg.iterrows()]
+        return [
+            {"label": f"{row['Player']} ({row['Team']})", "value": f"{row['Player']}|{row['Team']}"}
+            for _, row in adv.iterrows()
+            if pd.notna(row.get("Player"))
+        ]
 
     @app.callback(
         Output("player-ts-chart", "figure"),
@@ -101,41 +121,51 @@ def register_callbacks(app) -> None:
         Output("player-trend-chart", "figure"),
         Input("player-select", "value"),
     )
-    def update_player(player_id):
-        if not player_id:
+    def update_player(player_key):
+        if not player_key:
             raise PreventUpdate
-        logs = _load_game_logs()
-        if logs.empty:
+        name, team = player_key.split("|", 1)
+
+        adv = _load_advanced()
+        tot = _load_totals()
+
+        if adv.empty:
             raise PreventUpdate
 
-        player_logs = logs[logs["PLAYER_ID"] == player_id].copy()
-        player_logs = player_logs.sort_values("GAME_DATE")
-        name = player_logs["PLAYER_NAME"].iloc[0] if len(player_logs) else "Player"
+        player_adv = adv[(adv["Player"] == name) & (adv["Team"] == team)]
+        player_tot = tot[(tot["Player"] == name) & (tot["Team"] == team)] if not tot.empty else pd.DataFrame()
 
-        # Cumulative Bayesian TS% with shrinking CI
-        ts_fig = _cumulative_ts_chart(player_logs, name)
-        usage_fig = _usage_scatter(player_logs, name)
-        trend_fig = _pts_trend(player_logs, name)
-        return ts_fig, usage_fig, trend_fig
+        ts_fig = _player_ts_gauge(player_adv, name)
+        usage_fig = _player_usage_chart(player_adv, name, adv)
+        profile_fig = _player_profile_chart(player_adv, player_tot, name)
+        return ts_fig, usage_fig, profile_fig
 
     # ── Team view ─────────────────────────────────────────────────────────────
     @app.callback(Output("team-select", "options"), Input("url", "pathname"))
     def populate_team_dropdown(_):
-        on_off = _load_on_off()
-        if on_off.empty:
+        adv = _load_advanced()
+        if adv.empty:
             return []
-        teams = sorted(on_off["TEAM_ABBREVIATION"].dropna().unique())
-        return [{"label": t, "value": t} for t in teams]
+        teams = sorted(adv["Team"].dropna().unique())
+        return [{"label": t, "value": t} for t in teams if t != "TOT"]
 
     @app.callback(Output("team-onoff-chart", "figure"), Input("team-select", "value"))
     def update_team(team):
         if not team:
             raise PreventUpdate
-        on_off = _load_on_off()
-        if on_off.empty:
-            return _empty_fig("No on/off data available.")
-        df = on_off[on_off["TEAM_ABBREVIATION"] == team].sort_values("DELTA", ascending=True)
-        return _on_off_team_chart(df, team)
+        adv = _load_advanced()
+        if adv.empty:
+            return _empty_fig("No data available.")
+
+        df = adv[(adv["Team"] == team) & (adv["G"] >= 3)].copy()
+        df = df.sort_values("WS", ascending=True)
+
+        # On/Off differential: ORtg - DRtg = net rating; compare to team average
+        df["NET_RTG"] = pd.to_numeric(df["ORtg"], errors="coerce") - pd.to_numeric(df["DRtg"], errors="coerce")
+        team_avg_net = df["NET_RTG"].mean()
+        df["NET_VS_TEAM"] = df["NET_RTG"] - team_avg_net
+
+        return _net_rtg_chart(df, team)
 
 
 # ── Chart builders ────────────────────────────────────────────────────────────
@@ -151,17 +181,15 @@ def _empty_fig(msg: str) -> go.Figure:
 def _win_shares_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=df["WIN_SHARES"], y=df["PLAYER_NAME"], orientation="h",
+        x=df["WS"], y=df["Player"], orientation="h",
         marker_color=BLUE,
-        customdata=df[["TEAM_ABBREVIATION", "GP"]],
-        hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>Win Shares: %{x:.2f}<extra></extra>",
+        customdata=df[["Team", "G"]],
+        hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>Win Shares: %{x:.1f}<extra></extra>",
     ))
     fig.update_layout(
-        title="Win Shares (Top 30)",
+        title="Win Shares — Top 30",
         xaxis_title="Win Shares",
-        template="plotly_dark",
-        height=700,
-        margin=dict(l=160),
+        template="plotly_dark", height=700, margin=dict(l=160),
     )
     return fig
 
@@ -169,141 +197,151 @@ def _win_shares_chart(df: pd.DataFrame) -> go.Figure:
 def _ts_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=df["TS_POSTERIOR"], y=df["PLAYER_NAME"],
+        x=df["TS_POSTERIOR"], y=df["Player"],
         mode="markers",
         marker=dict(color=BLUE, size=10),
         error_x=dict(
-            type="data",
-            symmetric=False,
+            type="data", symmetric=False,
             array=(df["TS_CI_HIGH"] - df["TS_POSTERIOR"]).values,
             arrayminus=(df["TS_POSTERIOR"] - df["TS_CI_LOW"]).values,
             color=GRAY,
         ),
         hovertemplate="<b>%{y}</b><br>Posterior TS%: %{x:.1%}<extra></extra>",
     ))
-    fig.add_vline(x=0.545, line_dash="dash", line_color=GOLD,
+    fig.add_vline(x=LEAGUE_AVG_TS, line_dash="dash", line_color=GOLD,
                   annotation_text="League avg", annotation_position="top right")
     fig.update_layout(
         title="True Shooting % — Bayesian Posterior with 90% CI",
-        xaxis_title="TS% (posterior mean)",
-        xaxis_tickformat=".0%",
-        template="plotly_dark",
-        height=700,
-        margin=dict(l=160),
-    )
-    return fig
-
-
-def _on_off_league_chart(df: pd.DataFrame) -> go.Figure:
-    colors = [GOLD if s else BLUE for s in df.get("SIGNAL", [False] * len(df))]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=df["DELTA"], y=df["PLAYER_NAME"], orientation="h",
-        marker_color=colors,
-        error_x=dict(
-            type="data", symmetric=False,
-            array=(df["DELTA_CI_HIGH"] - df["DELTA"]).values,
-            arrayminus=(df["DELTA"] - df["DELTA_CI_LOW"]).values,
-            color=GRAY,
-        ),
-        hovertemplate="<b>%{y}</b><br>On/Off Delta: %{x:+.1f}<extra></extra>",
-    ))
-    fig.add_vline(x=0, line_color=GRAY, line_dash="dot")
-    fig.update_layout(
-        title="On/Off Net Rating Delta with 90% CI (gold = statistically meaningful)",
-        xaxis_title="Net Rating Delta (pts/100 poss)",
+        xaxis_title="TS%", xaxis_tickformat=".0%",
         template="plotly_dark", height=700, margin=dict(l=160),
     )
     return fig
 
 
-def _on_off_team_chart(df: pd.DataFrame, team: str) -> go.Figure:
-    colors = [GOLD if s else BLUE for s in df.get("SIGNAL", [False] * len(df))]
+def _usage_efficiency_chart(df: pd.DataFrame) -> go.Figure:
+    fig = px.scatter(
+        df, x="USG%", y="TS_POSTERIOR",
+        text="Player", color="WS",
+        color_continuous_scale="Blues",
+        labels={"USG%": "Usage Rate %", "TS_POSTERIOR": "True Shooting %", "WS": "Win Shares"},
+        title="Usage vs Efficiency (size = Win Shares)",
+        size="WS", size_max=20,
+        hover_data=["Team", "G", "WS"],
+    )
+    fig.add_hline(y=LEAGUE_AVG_TS, line_dash="dash", line_color=GOLD)
+    fig.update_traces(textposition="top center", textfont_size=9)
+    fig.update_layout(template="plotly_dark", height=600, yaxis_tickformat=".0%")
+    return fig
+
+
+def _net_rtg_chart(df: pd.DataFrame, team: str) -> go.Figure:
+    colors = [GOLD if v > 0 else BLUE for v in df["NET_VS_TEAM"]]
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=df["DELTA"], y=df["PLAYER_NAME"], orientation="h",
+        x=df["NET_VS_TEAM"], y=df["Player"], orientation="h",
         marker_color=colors,
-        error_x=dict(
-            type="data", symmetric=False,
-            array=(df["DELTA_CI_HIGH"] - df["DELTA"]).values,
-            arrayminus=(df["DELTA"] - df["DELTA_CI_LOW"]).values,
-            color=GRAY,
+        customdata=df[["NET_RTG", "WS", "USG%"]],
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Net Rtg: %{customdata[0]:+.1f}<br>"
+            "vs Team avg: %{x:+.1f}<br>"
+            "Win Shares: %{customdata[1]:.1f} · USG%: %{customdata[2]:.1f}<extra></extra>"
         ),
-        hovertemplate="<b>%{y}</b><br>On: %{customdata[0]:+.1f} · Off: %{customdata[1]:+.1f}<br>Delta: %{x:+.1f}<extra></extra>",
-        customdata=df[["NET_ON", "NET_OFF"]].values,
     ))
     fig.add_vline(x=0, line_color=GRAY, line_dash="dot")
     fig.update_layout(
-        title=f"{team} — On/Off Net Rating Delta",
-        xaxis_title="Net Rating Delta (pts/100 poss)",
+        title=f"{team} — Net Rating vs Team Average (gold = above average)",
+        xaxis_title="Net Rating vs Team Avg (pts/100 poss)",
         template="plotly_dark", height=500, margin=dict(l=160),
     )
     return fig
 
 
-def _cumulative_ts_chart(logs: pd.DataFrame, name: str) -> go.Figure:
-    """Rolling cumulative Bayesian TS% as the season progresses."""
-    pts = pd.to_numeric(logs["PTS"], errors="coerce").fillna(0).cumsum()
-    fga = pd.to_numeric(logs["FGA"], errors="coerce").fillna(0).cumsum()
-    fta = pd.to_numeric(logs["FTA"], errors="coerce").fillna(0).cumsum()
+def _player_ts_gauge(player_adv: pd.DataFrame, name: str) -> go.Figure:
+    if player_adv.empty:
+        return _empty_fig("No data for this player.")
+    ts = float(pd.to_numeric(player_adv["TS%"].iloc[0], errors="coerce") or 0)
+    g = int(pd.to_numeric(player_adv["G"].iloc[0], errors="coerce") or 0)
 
-    from stats.bayesian import shrink_ts
-    ts = shrink_ts(pts, fga, fta)
-
-    dates = logs["GAME_DATE"].values
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=dates, y=ts["posterior_mean"], name="Posterior TS%",
-                             line=dict(color=BLUE)))
-    fig.add_trace(go.Scatter(x=dates, y=ts["ci_high_90"], name="90% CI high",
-                             line=dict(color=GRAY, dash="dot"), showlegend=False))
-    fig.add_trace(go.Scatter(x=dates, y=ts["ci_low_90"], name="90% CI",
-                             fill="tonexty", fillcolor="rgba(74,144,217,0.15)",
-                             line=dict(color=GRAY, dash="dot")))
-    fig.add_hline(y=0.545, line_dash="dash", line_color=GOLD,
-                  annotation_text="League avg")
-    fig.update_layout(title=f"{name} — Cumulative TS% (Bayesian)",
-                      yaxis_title="TS%", yaxis_tickformat=".0%",
-                      template="plotly_dark")
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=ts * 100,
+        delta={"reference": LEAGUE_AVG_TS * 100, "suffix": "%"},
+        title={"text": f"{name}<br><sup>True Shooting % ({g} GP)</sup>"},
+        gauge={
+            "axis": {"range": [30, 80]},
+            "bar": {"color": BLUE},
+            "threshold": {
+                "line": {"color": GOLD, "width": 3},
+                "thickness": 0.75,
+                "value": LEAGUE_AVG_TS * 100,
+            },
+        },
+        number={"suffix": "%"},
+    ))
+    fig.update_layout(template="plotly_dark", height=300)
     return fig
 
 
-def _usage_scatter(logs: pd.DataFrame, name: str) -> go.Figure:
-    logs = logs.copy()
-    for c in ["PTS", "FGA", "FTA", "MIN", "TOV"]:
-        logs[c] = pd.to_numeric(logs[c], errors="coerce").fillna(0)
-    from stats.efficiency import true_shooting_pct
-    logs["TS"] = true_shooting_pct(logs["PTS"], logs["FGA"], logs["FTA"])
-    logs["PLAYS"] = logs["FGA"] + 0.44 * logs["FTA"] + logs["TOV"]
-    fig = px.scatter(logs, x="PLAYS", y="TS", hover_data=["GAME_DATE"],
-                     color_discrete_sequence=[BLUE],
-                     labels={"PLAYS": "Plays Used", "TS": "True Shooting %"},
-                     title=f"{name} — Usage vs Efficiency per game")
+def _player_usage_chart(player_adv: pd.DataFrame, name: str, all_adv: pd.DataFrame) -> go.Figure:
+    """Player's usage vs efficiency relative to the full league."""
+    fig = px.scatter(
+        all_adv[all_adv["G"] >= 5], x="USG%", y="TS%",
+        opacity=0.3, color_discrete_sequence=[GRAY],
+        labels={"USG%": "Usage %", "TS%": "True Shooting %"},
+        title=f"{name} — Usage vs Efficiency (vs league)",
+    )
+    if not player_adv.empty:
+        fig.add_trace(go.Scatter(
+            x=pd.to_numeric(player_adv["USG%"], errors="coerce"),
+            y=pd.to_numeric(player_adv["TS%"], errors="coerce"),
+            mode="markers+text",
+            marker=dict(color=GOLD, size=16, symbol="star"),
+            text=[name], textposition="top center",
+            name=name,
+        ))
     fig.update_layout(template="plotly_dark", yaxis_tickformat=".0%")
     return fig
 
 
-def _pts_trend(logs: pd.DataFrame, name: str) -> go.Figure:
-    logs = logs.copy()
-    logs["PTS"] = pd.to_numeric(logs["PTS"], errors="coerce").fillna(0)
-    logs["ROLLING_PTS"] = logs["PTS"].rolling(5, min_periods=1).mean()
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=logs["GAME_DATE"], y=logs["PTS"], name="Points",
-                         marker_color=GRAY))
-    fig.add_trace(go.Scatter(x=logs["GAME_DATE"], y=logs["ROLLING_PTS"],
-                             name="5-game avg", line=dict(color=GOLD, width=2)))
-    fig.update_layout(title=f"{name} — Points per game", template="plotly_dark")
+def _player_profile_chart(player_adv: pd.DataFrame, player_tot: pd.DataFrame, name: str) -> go.Figure:
+    """Radar-style bar chart of key advanced metrics, percentile-ranked in league."""
+    if player_adv.empty:
+        return _empty_fig("No data.")
+
+    row = player_adv.iloc[0]
+    metrics = {
+        "PER": ("PER", 15),
+        "TS%": ("TS%", LEAGUE_AVG_TS),
+        "USG%": ("USG%", 20),
+        "Win Shares": ("WS", 1),
+        "WS/40": ("WS/40", 0.05),
+    }
+
+    names, values, baselines = [], [], []
+    for label, (col, baseline) in metrics.items():
+        v = pd.to_numeric(row.get(col), errors="coerce")
+        if pd.notna(v):
+            names.append(label)
+            values.append(float(v))
+            baselines.append(baseline)
+
+    colors = [GOLD if v >= b else BLUE for v, b in zip(values, baselines)]
+    fig = go.Figure(go.Bar(
+        x=names, y=values, marker_color=colors,
+        hovertemplate="%{x}: %{y:.3f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=f"{name} — Key Metrics (gold = above baseline)",
+        template="plotly_dark", height=350,
+    )
     return fig
 
 
 def _summary_table(df: pd.DataFrame):
-    from dash import dash_table
-    cols = ["PLAYER_NAME", "TEAM_ABBREVIATION", "GP", "WIN_SHARES"]
-    if "TS_POSTERIOR" in df.columns:
-        cols += ["TS_POSTERIOR"]
-    if "DELTA" in df.columns:
-        cols += ["DELTA"]
-    display = df[cols].copy()
-    display.columns = [c.replace("_", " ").title() for c in cols]
+    cols = ["Player", "Team", "G", "WS", "TS_POSTERIOR", "USG%", "PER"]
+    display = df[[c for c in cols if c in df.columns]].copy()
+    display = display.rename(columns={"TS_POSTERIOR": "TS% (posterior)", "USG%": "USG%"})
     for c in display.select_dtypes("float").columns:
         display[c] = display[c].round(3)
 

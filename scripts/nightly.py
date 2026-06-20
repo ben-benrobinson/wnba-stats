@@ -2,7 +2,7 @@
 Nightly data refresh — run via cron at ~2am ET after games complete.
 
 Cron entry (add with `crontab -e` on EC2):
-  0 2 * * * cd /home/ec2-user/wnba-stats && /home/ec2-user/wnba-stats/venv/bin/python -m scripts.nightly >> /var/log/wnba-nightly.log 2>&1
+  0 2 * * * cd /home/ubuntu/wnba-stats && /home/ubuntu/wnba-stats/venv/bin/python -m scripts.nightly >> /var/log/wnba-nightly.log 2>&1
 """
 
 import logging
@@ -20,38 +20,33 @@ log = logging.getLogger(__name__)
 def run():
     log.info("=== WNBA nightly refresh started %s ===", datetime.utcnow().isoformat())
 
-    from data.fetch import fetch_player_box_scores, fetch_team_box_scores, fetch_all_on_off
+    from data.fetch import (
+        fetch_player_per_game,
+        fetch_player_totals,
+        fetch_player_advanced,
+        fetch_team_stats,
+    )
     from data.store import save
-    from stats.efficiency import aggregate_player_season
-    from stats.win_shares import compute_win_shares
 
-    log.info("Fetching player game logs...")
-    player_logs = fetch_player_box_scores()
-    save(player_logs, "player_game_logs")
-    log.info("  %d rows saved", len(player_logs))
+    log.info("Fetching per-game stats from basketball-reference...")
+    per_game = fetch_player_per_game()
+    save(per_game, "player_per_game")
+    log.info("  %d rows", len(per_game))
 
-    log.info("Fetching team game logs...")
-    team_logs = fetch_team_box_scores()
-    save(team_logs, "team_game_logs")
-    log.info("  %d rows saved", len(team_logs))
+    log.info("Fetching season totals...")
+    totals = fetch_player_totals()
+    save(totals, "player_totals")
+    log.info("  %d rows", len(totals))
 
-    log.info("Fetching on/off splits...")
-    on_off = fetch_all_on_off()
-    if not on_off.empty:
-        save(on_off, "on_off_raw")
-        log.info("  %d rows saved", len(on_off))
-    else:
-        log.warning("  No on/off data returned")
+    log.info("Fetching advanced stats (WS, TS%%, USG%%, PER, ORtg, DRtg)...")
+    advanced = fetch_player_advanced()
+    save(advanced, "player_advanced")
+    log.info("  %d rows", len(advanced))
 
-    log.info("Computing player aggregates...")
-    agg = aggregate_player_season(player_logs)
-    save(agg, "player_agg")
-    log.info("  %d players aggregated", len(agg))
-
-    log.info("Computing win shares...")
-    ws = compute_win_shares(agg, team_logs)
-    save(ws, "win_shares")
-    log.info("  %d players with win shares", len(ws))
+    log.info("Fetching team stats...")
+    teams = fetch_team_stats()
+    save(teams, "team_stats")
+    log.info("  %d rows", len(teams))
 
     log.info("=== Refresh complete ===")
 

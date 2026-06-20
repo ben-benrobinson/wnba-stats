@@ -36,11 +36,11 @@ def league_layout() -> html.Div:
                     dcc.Dropdown(
                         id="league-sort",
                         options=[
-                            {"label": "Win Shares", "value": "WIN_SHARES"},
-                            {"label": "True Shooting % (posterior)", "value": "TS_POSTERIOR"},
-                            {"label": "On/Off Delta", "value": "DELTA"},
+                            {"label": "Win Shares", "value": "WS"},
+                            {"label": "True Shooting % (Bayesian)", "value": "TS_POSTERIOR"},
+                            {"label": "Usage vs Efficiency", "value": "USG%"},
                         ],
-                        value="WIN_SHARES",
+                        value="WS",
                         clearable=False,
                     ),
                 ], md=3),
