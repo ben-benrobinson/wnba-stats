@@ -19,7 +19,7 @@ A statistically rigorous WNBA performance dashboard answering one core question:
 
 ## Data
 
-Pulled from the unofficial `stats.wnba.com` API (no key required). Refreshed nightly via cron after games complete. Stored in SQLite locally.
+Pulled from basketball-reference.com. Refreshed nightly via cron after games complete. Stored in SQLite locally.
 
 ## Running locally
 
@@ -37,4 +37,5 @@ See [DEPLOY.md](DEPLOY.md) for EC2 + Nginx + Gunicorn setup.
 
 - [ ] Play-by-play data (shot quality, RAPM)
 - [ ] Season-over-season player development curves
-- [ ] Lineup analysis (5-man unit net ratings)
+- [ ] Lineup analysis (5-player unit net ratings)
+- [ ] Plus/minus (+/-) — raw and adjusted

@@ -24,6 +24,25 @@ TEAM_LOGOS: dict[str, str] = {
     "WAS": f"{ESPN_BASE}/was.png",
 }
 
+# Primary team colors for bar chart fills
+TEAM_COLORS: dict[str, str] = {
+    "ATL": "#C8102E",  # Atlanta Dream — red
+    "CHI": "#418FDE",  # Chicago Sky — sky blue
+    "CON": "#E86100",  # Connecticut Sun — orange
+    "DAL": "#0057B8",  # Dallas Wings — steel blue
+    "GSV": "#7B4F9E",  # Golden State Valkyries — purple
+    "IND": "#E03A3E",  # Indiana Fever — red
+    "LAS": "#552583",  # Los Angeles Sparks — purple
+    "LVA": "#B4001B",  # Las Vegas Aces — dark red
+    "MIN": "#236192",  # Minnesota Lynx — teal blue
+    "NYL": "#6ECEB2",  # New York Liberty — seafoam green
+    "PHO": "#E56020",  # Phoenix Mercury — orange
+    "POR": "#CE1141",  # Portland Fire — red
+    "SEA": "#2C5234",  # Seattle Storm — forest green
+    "TOR": "#722F37",  # Toronto Tempo — maroon
+    "WAS": "#002B5C",  # Washington Mystics — navy
+}
+
 TEAM_NAMES: dict[str, str] = {
     "ATL": "Atlanta Dream",
     "CHI": "Chicago Sky",

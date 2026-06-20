@@ -6,7 +6,7 @@ from dash import Input, Output, dash_table
 from dash.exceptions import PreventUpdate
 
 from data.store import load
-from data.teams import TEAM_LOGOS
+from data.teams import TEAM_LOGOS, TEAM_COLORS
 from stats.bayesian import shrink_shooting
 
 GOLD = "#f5a623"
@@ -167,6 +167,17 @@ def _add_team_logos(fig: go.Figure, df: pd.DataFrame) -> go.Figure:
         if not logo_url:
             continue
         y_pos = n - 1 - i  # first row = top of chart
+
+        # White rounded-rect background so logos pop against the dark theme
+        fig.add_shape(
+            type="rect",
+            x0=-0.165, x1=-0.075,
+            y0=y_pos - 0.44, y1=y_pos + 0.44,
+            xref="paper", yref="y",
+            fillcolor="white",
+            line_color="white",
+            layer="below",
+        )
         fig.add_layout_image(
             source=logo_url,
             x=-0.12,
@@ -192,10 +203,11 @@ def _empty_fig(msg: str) -> go.Figure:
 
 
 def _win_shares_chart(df: pd.DataFrame) -> go.Figure:
+    colors = [TEAM_COLORS.get(t, BLUE) for t in df["Team"]]
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df["WS"], y=df["Player"], orientation="h",
-        marker_color=BLUE,
+        marker_color=colors,
         customdata=df[["Team", "G"]],
         hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>Win Shares: %{x:.1f}<extra></extra>",
     ))
@@ -209,11 +221,12 @@ def _win_shares_chart(df: pd.DataFrame) -> go.Figure:
 
 
 def _ts_chart(df: pd.DataFrame) -> go.Figure:
+    colors = [TEAM_COLORS.get(t, BLUE) for t in df["Team"]]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=df["TS_POSTERIOR"], y=df["Player"],
         mode="markers",
-        marker=dict(color=BLUE, size=10),
+        marker=dict(color=colors, size=10),
         error_x=dict(
             type="data", symmetric=False,
             array=(df["TS_CI_HIGH"] - df["TS_POSTERIOR"]).values,
@@ -240,10 +253,11 @@ def _generic_bar_chart(df: pd.DataFrame, col: str) -> go.Figure:
         "ORtg": "Offensive Rating (pts/100 poss)",
         "NET_RTG": "Net Rating (ORtg − DRtg)",
     }
+    colors = [TEAM_COLORS.get(t, BLUE) for t in df["Team"]]
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df[col], y=df["Player"], orientation="h",
-        marker_color=BLUE,
+        marker_color=colors,
         customdata=df[["Team", "G"]],
         hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>" + labels.get(col, col) + ": %{x:.2f}<extra></extra>",
     ))
@@ -273,11 +287,11 @@ def _usage_efficiency_chart(df: pd.DataFrame) -> go.Figure:
 
 
 def _net_rtg_chart(df: pd.DataFrame, team: str) -> go.Figure:
-    colors = [GOLD if v > 0 else BLUE for v in df["NET_VS_TEAM"]]
+    bar_colors = [TEAM_COLORS.get(team, BLUE)] * len(df)
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df["NET_VS_TEAM"], y=df["Player"], orientation="h",
-        marker_color=colors,
+        marker_color=bar_colors,
         customdata=df[["NET_RTG", "WS", "USG%"]],
         hovertemplate=(
             "<b>%{y}</b><br>"
