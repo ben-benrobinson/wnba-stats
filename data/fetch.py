@@ -18,7 +18,7 @@ HEADERS = {
     "x-nba-stats-token": "true",
 }
 
-CURRENT_SEASON = "2025"
+CURRENT_SEASON = "2026"
 SEASON_TYPE = "Regular Season"
 
 
