@@ -156,31 +156,30 @@ def register_callbacks(app) -> None:
 
 def _add_team_logos(fig: go.Figure, df: pd.DataFrame) -> go.Figure:
     """
-    Place a small team logo to the left of each player name on the y-axis.
-    Works for both horizontal bar and scatter charts with categorical y-axis.
-    Players in df must be in the same order as plotted (top-to-bottom = last-to-first in df).
+    Place team logos to the left of player names in the margin.
+    Plotly renders df.iloc[0] at the TOP of the chart (y = n-1 in data coords).
+    We use xref='paper' with a sufficiently negative x so logos land in the
+    margin (not clipped to the plot edge), paired with a large margin.l.
     """
     n = len(df)
     for i, (_, row) in enumerate(df.iterrows()):
         logo_url = TEAM_LOGOS.get(row.get("Team", ""))
         if not logo_url:
             continue
-        # Plotly categorical y: df.iloc[0] renders at the bottom (y=0),
-        # df.iloc[n-1] renders at the top (y=n-1). We flip so best player is at top.
-        y_pos = n - 1 - i
+        y_pos = n - 1 - i  # first row = top of chart
         fig.add_layout_image(
             source=logo_url,
-            x=-0.005,
+            x=-0.12,
             y=y_pos,
             xref="paper",
             yref="y",
-            sizex=0.045,
-            sizey=0.7,
-            xanchor="right",
+            sizex=0.09,
+            sizey=0.75,
+            xanchor="center",
             yanchor="middle",
             layer="above",
         )
-    fig.update_layout(margin=dict(l=200))
+    fig.update_layout(margin=dict(l=280))
     return fig
 
 
