@@ -1,0 +1,92 @@
+/* ── Dash dcc.Dropdown dark theme override ── */
+
+/* Main control box */
+.Select-control,
+.VirtualizedSelectFocusedOption,
+.Select--single > .Select-control {
+    background-color: #1e2130 !important;
+    border-color: #3a3f55 !important;
+    color: #e0e0e0 !important;
+}
+
+/* Displayed value text */
+.Select-value-label,
+.Select-placeholder {
+    color: #e0e0e0 !important;
+}
+
+/* Arrow */
+.Select-arrow {
+    border-top-color: #e0e0e0 !important;
+}
+
+/* Dropdown menu panel */
+.Select-menu-outer {
+    background-color: #1e2130 !important;
+    border-color: #3a3f55 !important;
+}
+
+.Select-menu {
+    background-color: #1e2130 !important;
+}
+
+/* Individual options */
+.Select-option {
+    background-color: #1e2130 !important;
+    color: #e0e0e0 !important;
+}
+
+.Select-option:hover,
+.Select-option.is-focused {
+    background-color: #2e3450 !important;
+    color: #ffffff !important;
+}
+
+.Select-option.is-selected {
+    background-color: #4a90d9 !important;
+    color: #ffffff !important;
+}
+
+/* Newer Dash versions use these class names */
+.dash-dropdown .Select-control {
+    background-color: #1e2130 !important;
+    border-color: #3a3f55 !important;
+}
+
+/* React-Select v5+ (Dash 2.x) */
+div[class*="-control"] {
+    background-color: #1e2130 !important;
+    border-color: #3a3f55 !important;
+    color: #e0e0e0 !important;
+}
+
+div[class*="-menu"] {
+    background-color: #1e2130 !important;
+    border: 1px solid #3a3f55 !important;
+}
+
+div[class*="-option"] {
+    background-color: #1e2130 !important;
+    color: #e0e0e0 !important;
+}
+
+div[class*="-option"]:hover,
+div[class*="-option--is-focused"] {
+    background-color: #2e3450 !important;
+    color: #ffffff !important;
+}
+
+div[class*="-option--is-selected"] {
+    background-color: #4a90d9 !important;
+    color: #ffffff !important;
+}
+
+div[class*="-singleValue"],
+div[class*="-placeholder"],
+div[class*="-Input"] input {
+    color: #e0e0e0 !important;
+}
+
+div[class*="-indicatorContainer"] svg {
+    fill: #e0e0e0 !important;
+}
