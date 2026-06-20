@@ -26,7 +26,7 @@ def _get_table(url: str, table_id: str, sleep: float = 1.5) -> pd.DataFrame:
     time.sleep(sleep)
     resp = requests.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html5lib")
+    soup = BeautifulSoup(resp.content.decode("utf-8", errors="replace"), "html5lib")
     table = soup.find("table", id=table_id)
     if table is None:
         raise ValueError(f"Table '{table_id}' not found at {url}")

@@ -154,44 +154,11 @@ def register_callbacks(app) -> None:
 
 # ── Chart builders ────────────────────────────────────────────────────────────
 
-def _add_team_logos(fig: go.Figure, df: pd.DataFrame) -> go.Figure:
-    """
-    Place team logos to the left of player names in the margin.
-    Plotly renders df.iloc[0] at the TOP of the chart (y = n-1 in data coords).
-    We use xref='paper' with a sufficiently negative x so logos land in the
-    margin (not clipped to the plot edge), paired with a large margin.l.
-    """
-    n = len(df)
-    for i, (_, row) in enumerate(df.iterrows()):
-        logo_url = TEAM_LOGOS.get(row.get("Team", ""))
-        if not logo_url:
-            continue
-        y_pos = n - 1 - i  # first row = top of chart
-
-        # White rounded-rect background so logos pop against the dark theme
-        fig.add_shape(
-            type="rect",
-            x0=-0.165, x1=-0.075,
-            y0=y_pos - 0.44, y1=y_pos + 0.44,
-            xref="paper", yref="y",
-            fillcolor="white",
-            line_color="white",
-            layer="below",
-        )
-        fig.add_layout_image(
-            source=logo_url,
-            x=-0.12,
-            y=y_pos,
-            xref="paper",
-            yref="y",
-            sizex=0.09,
-            sizey=0.75,
-            xanchor="center",
-            yanchor="middle",
-            layer="above",
-        )
-    fig.update_layout(margin=dict(l=280))
-    return fig
+def _logo_hover(team: str, extra_lines: str) -> str:
+    """Build a hovertemplate snippet that shows the team logo + info."""
+    logo_url = TEAM_LOGOS.get(team, "")
+    img = f"<img src='{logo_url}' width='32' style='vertical-align:middle;margin-right:6px;background:white;border-radius:4px;padding:2px;'>" if logo_url else ""
+    return img + extra_lines
 
 
 def _empty_fig(msg: str) -> go.Figure:
@@ -204,24 +171,31 @@ def _empty_fig(msg: str) -> go.Figure:
 
 def _win_shares_chart(df: pd.DataFrame) -> go.Figure:
     colors = [TEAM_COLORS.get(t, BLUE) for t in df["Team"]]
+    hovers = [
+        _logo_hover(row["Team"], f"<b>{row['Player']}</b> · {row['Team']}<br>{row['G']} GP · Win Shares: {row['WS']:.1f}")
+        for _, row in df.iterrows()
+    ]
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df["WS"], y=df["Player"], orientation="h",
         marker_color=colors,
-        customdata=df[["Team", "G"]],
-        hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>Win Shares: %{x:.1f}<extra></extra>",
+        hovertext=hovers,
+        hovertemplate="%{hovertext}<extra></extra>",
     ))
     fig.update_layout(
         title="Win Shares — Top 50",
         xaxis_title="Win Shares",
         template="plotly_dark", height=900, margin=dict(l=160),
     )
-    _add_team_logos(fig, df)
     return fig
 
 
 def _ts_chart(df: pd.DataFrame) -> go.Figure:
     colors = [TEAM_COLORS.get(t, BLUE) for t in df["Team"]]
+    hovers = [
+        _logo_hover(row["Team"], f"<b>{row['Player']}</b> · {row['Team']}<br>Posterior TS%: {row['TS_POSTERIOR']:.1%}")
+        for _, row in df.iterrows()
+    ]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=df["TS_POSTERIOR"], y=df["Player"],
@@ -233,7 +207,8 @@ def _ts_chart(df: pd.DataFrame) -> go.Figure:
             arrayminus=(df["TS_POSTERIOR"] - df["TS_CI_LOW"]).values,
             color=GRAY,
         ),
-        hovertemplate="<b>%{y}</b><br>Posterior TS%: %{x:.1%}<extra></extra>",
+        hovertext=hovers,
+        hovertemplate="%{hovertext}<extra></extra>",
     ))
     fig.add_vline(x=LEAGUE_AVG_TS, line_dash="dash", line_color=GOLD,
                   annotation_text="League avg", annotation_position="top right")
@@ -242,7 +217,6 @@ def _ts_chart(df: pd.DataFrame) -> go.Figure:
         xaxis_title="TS%", xaxis_tickformat=".0%",
         template="plotly_dark", height=900, margin=dict(l=160),
     )
-    _add_team_logos(fig, df)
     return fig
 
 
@@ -254,19 +228,23 @@ def _generic_bar_chart(df: pd.DataFrame, col: str) -> go.Figure:
         "NET_RTG": "Net Rating (ORtg − DRtg)",
     }
     colors = [TEAM_COLORS.get(t, BLUE) for t in df["Team"]]
+    label = labels.get(col, col)
+    hovers = [
+        _logo_hover(row["Team"], f"<b>{row['Player']}</b> · {row['Team']}<br>{row['G']} GP · {label}: {row[col]:.2f}")
+        for _, row in df.iterrows()
+    ]
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df[col], y=df["Player"], orientation="h",
         marker_color=colors,
-        customdata=df[["Team", "G"]],
-        hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>" + labels.get(col, col) + ": %{x:.2f}<extra></extra>",
+        hovertext=hovers,
+        hovertemplate="%{hovertext}<extra></extra>",
     ))
     fig.update_layout(
-        title=f"Top 50 — {labels.get(col, col)}",
-        xaxis_title=labels.get(col, col),
+        title=f"Top 50 — {label}",
+        xaxis_title=label,
         template="plotly_dark", height=900, margin=dict(l=160),
     )
-    _add_team_logos(fig, df)
     return fig
 
 
@@ -287,26 +265,24 @@ def _usage_efficiency_chart(df: pd.DataFrame) -> go.Figure:
 
 
 def _net_rtg_chart(df: pd.DataFrame, team: str) -> go.Figure:
-    bar_colors = [TEAM_COLORS.get(team, BLUE)] * len(df)
+    team_color = TEAM_COLORS.get(team, BLUE)
+    hovers = [
+        _logo_hover(team, f"<b>{row['Player']}</b><br>Net Rtg: {row['NET_RTG']:+.1f} · vs avg: {row['NET_VS_TEAM']:+.1f}<br>WS: {row['WS']:.1f} · USG%: {row['USG%']:.1f}")
+        for _, row in df.iterrows()
+    ]
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df["NET_VS_TEAM"], y=df["Player"], orientation="h",
-        marker_color=bar_colors,
-        customdata=df[["NET_RTG", "WS", "USG%"]],
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            "Net Rtg: %{customdata[0]:+.1f}<br>"
-            "vs Team avg: %{x:+.1f}<br>"
-            "Win Shares: %{customdata[1]:.1f} · USG%: %{customdata[2]:.1f}<extra></extra>"
-        ),
+        marker_color=team_color,
+        hovertext=hovers,
+        hovertemplate="%{hovertext}<extra></extra>",
     ))
     fig.add_vline(x=0, line_color=GRAY, line_dash="dot")
     fig.update_layout(
-        title=f"{team} — Net Rating vs Team Average (gold = above average)",
+        title=f"{team} — Net Rating vs Team Average",
         xaxis_title="Net Rating vs Team Avg (pts/100 poss)",
         template="plotly_dark", height=500, margin=dict(l=160),
     )
-    _add_team_logos(fig, df)
     return fig
 
 
