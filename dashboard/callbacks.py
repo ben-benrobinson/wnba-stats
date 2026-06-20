@@ -6,6 +6,7 @@ from dash import Input, Output, dash_table
 from dash.exceptions import PreventUpdate
 
 from data.store import load
+from data.teams import TEAM_LOGOS
 from stats.bayesian import shrink_shooting
 
 GOLD = "#f5a623"
@@ -153,6 +154,36 @@ def register_callbacks(app) -> None:
 
 # ── Chart builders ────────────────────────────────────────────────────────────
 
+def _add_team_logos(fig: go.Figure, df: pd.DataFrame) -> go.Figure:
+    """
+    Place a small team logo to the left of each player name on the y-axis.
+    Works for both horizontal bar and scatter charts with categorical y-axis.
+    Players in df must be in the same order as plotted (top-to-bottom = last-to-first in df).
+    """
+    n = len(df)
+    for i, (_, row) in enumerate(df.iterrows()):
+        logo_url = TEAM_LOGOS.get(row.get("Team", ""))
+        if not logo_url:
+            continue
+        # Plotly categorical y: df.iloc[0] renders at the bottom (y=0),
+        # df.iloc[n-1] renders at the top (y=n-1). We flip so best player is at top.
+        y_pos = n - 1 - i
+        fig.add_layout_image(
+            source=logo_url,
+            x=-0.005,
+            y=y_pos,
+            xref="paper",
+            yref="y",
+            sizex=0.045,
+            sizey=0.7,
+            xanchor="right",
+            yanchor="middle",
+            layer="above",
+        )
+    fig.update_layout(margin=dict(l=200))
+    return fig
+
+
 def _empty_fig(msg: str) -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(text=msg, xref="paper", yref="paper", x=0.5, y=0.5,
@@ -170,10 +201,11 @@ def _win_shares_chart(df: pd.DataFrame) -> go.Figure:
         hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>Win Shares: %{x:.1f}<extra></extra>",
     ))
     fig.update_layout(
-        title="Win Shares — Top 30",
+        title="Win Shares — Top 50",
         xaxis_title="Win Shares",
-        template="plotly_dark", height=700, margin=dict(l=160),
+        template="plotly_dark", height=900, margin=dict(l=160),
     )
+    _add_team_logos(fig, df)
     return fig
 
 
@@ -196,8 +228,9 @@ def _ts_chart(df: pd.DataFrame) -> go.Figure:
     fig.update_layout(
         title="True Shooting % — Bayesian Posterior with 90% CI",
         xaxis_title="TS%", xaxis_tickformat=".0%",
-        template="plotly_dark", height=700, margin=dict(l=160),
+        template="plotly_dark", height=900, margin=dict(l=160),
     )
+    _add_team_logos(fig, df)
     return fig
 
 
@@ -220,6 +253,7 @@ def _generic_bar_chart(df: pd.DataFrame, col: str) -> go.Figure:
         xaxis_title=labels.get(col, col),
         template="plotly_dark", height=900, margin=dict(l=160),
     )
+    _add_team_logos(fig, df)
     return fig
 
 
@@ -259,6 +293,7 @@ def _net_rtg_chart(df: pd.DataFrame, team: str) -> go.Figure:
         xaxis_title="Net Rating vs Team Avg (pts/100 poss)",
         template="plotly_dark", height=500, margin=dict(l=160),
     )
+    _add_team_logos(fig, df)
     return fig
 
 
