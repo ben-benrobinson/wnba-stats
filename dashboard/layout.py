@@ -18,70 +18,31 @@ NAVBAR = dbc.NavbarSimple(
 GLOSSARY = dbc.Container([
     html.Hr(className="mt-5"),
     dbc.Accordion([
-        dbc.AccordionItem(title="Metric Glossary", children=[
+        dbc.AccordionItem(title="Stat Glossary", children=[
             dbc.Row([
                 dbc.Col([
-                    html.H6("Win Shares (WS)"),
-                    html.P("Estimates the number of team wins a player has produced over the season. "
-                           "Combines offensive and defensive contributions into a single number. "
-                           "A WS of 3.0 means the player is responsible for roughly 3 team wins. "
-                           "Computed by basketball-reference from box score data."),
-
-                    html.H6("Win Shares per 40 minutes (WS/40)"),
-                    html.P("Win Shares scaled to a per-40-minute rate, making it fair to compare starters "
-                           "who log heavy minutes against bench players with fewer opportunities. "
-                           "League average is roughly 0.100."),
-
-                    html.H6("Offensive Win Shares (OWS) / Defensive Win Shares (DWS)"),
-                    html.P("WS split into offensive and defensive contributions. "
-                           "OWS reflects scoring efficiency and playmaking; DWS reflects rebounding, "
-                           "steals, blocks, and defensive positioning."),
-
-                    html.H6("True Shooting % (TS%)"),
-                    html.P([
-                        "The most complete measure of shooting efficiency. Unlike FG%, it accounts for "
-                        "3-pointers (worth more) and free throws. Formula: ",
-                        html.Code("TS% = PTS / (2 × (FGA + 0.44 × FTA))"),
-                        ". League average is roughly 54.5%. A player at 60%+ is elite."
-                    ]),
-
-                    html.H6("True Shooting % — Bayesian Posterior"),
-                    html.P("Raw TS% is unreliable early in the season — a player who goes 3-for-3 "
-                           "from three looks like a 100% shooter. Bayesian shrinkage fixes this by "
-                           "pulling each player's TS% toward the league average, weighted by how many "
-                           "attempts they've taken. The more attempts, the more the posterior trusts "
-                           "the observed rate. The error bars show the 90% credible interval — the range "
-                           "where the player's true shooting talent likely falls."),
+                    html.H6("PTS — Points per game"),
+                    html.P("Average points scored per game."),
+                    html.H6("TRB — Total Rebounds per game"),
+                    html.P("Offensive + defensive rebounds per game."),
+                    html.H6("AST — Assists per game"),
+                    html.P("Passes leading directly to a made basket, per game."),
+                    html.H6("STL — Steals per game"),
+                    html.P("Times the player legally strips or intercepts the ball, per game."),
+                    html.H6("BLK — Blocks per game"),
+                    html.P("Opponent field goal attempts deflected, per game."),
                 ], md=6),
                 dbc.Col([
-                    html.H6("Player Efficiency Rating (PER)"),
-                    html.P("A per-minute box score rating that combines all positive contributions "
-                           "(points, rebounds, assists, steals, blocks) and subtracts negatives "
-                           "(missed shots, turnovers, fouls). Scaled so that 15.0 is league average. "
-                           "Useful for a quick read but doesn't capture defense well."),
-
-                    html.H6("Usage Rate (USG%)"),
-                    html.P("The percentage of team possessions a player uses while on the floor — "
-                           "via field goal attempts, free throw attempts, or turnovers. "
-                           "A player at 30%+ is a primary option; 15% or below is a role player. "
-                           "High usage + high efficiency = star player."),
-
-                    html.H6("Offensive Rating (ORtg)"),
-                    html.P("Points the team scores per 100 possessions while this player is on the floor. "
-                           "League average is roughly 100. Measures how well the offense runs with the player."),
-
-                    html.H6("Defensive Rating (DRtg)"),
-                    html.P("Points the team allows per 100 possessions while this player is on the floor. "
-                           "Lower is better. A player with DRtg of 95 is anchoring a very good defense."),
-
-                    html.H6("Net Rating (Net Rtg)"),
-                    html.P([
-                        "The most important single number for player impact: ",
-                        html.Code("Net Rtg = ORtg − DRtg"),
-                        ". Positive means the team outscores opponents when this player is on the floor. "
-                        "In the Team view, we show each player's Net Rating relative to their team average "
-                        "— gold bars mean the team is measurably better with them on the court."
-                    ]),
+                    html.H6("TOV — Turnovers per game"),
+                    html.P("Times the player loses possession, per game. Lower is better."),
+                    html.H6("MP — Minutes per game"),
+                    html.P("Average playing time per game."),
+                    html.H6("FG% — Field Goal Percentage"),
+                    html.P("Percentage of field goal attempts made (all 2s and 3s combined)."),
+                    html.H6("3P% — 3-Point Percentage"),
+                    html.P("Percentage of 3-point attempts made."),
+                    html.H6("FT% — Free Throw Percentage"),
+                    html.P("Percentage of free throw attempts made."),
                 ], md=6),
             ]),
         ]),
@@ -111,15 +72,18 @@ def league_layout() -> html.Div:
                     dcc.Dropdown(
                         id="league-sort",
                         options=[
-                            {"label": "Win Shares", "value": "WS"},
-                            {"label": "Win Shares per 40 min", "value": "WS/40"},
-                            {"label": "True Shooting % (Bayesian)", "value": "TS_POSTERIOR"},
-                            {"label": "Usage vs Efficiency", "value": "USG%"},
-                            {"label": "Player Efficiency Rating", "value": "PER"},
-                            {"label": "Offensive Rating", "value": "ORtg"},
-                            {"label": "Net Rating (ORtg - DRtg)", "value": "NET_RTG"},
+                            {"label": "Points", "value": "PTS"},
+                            {"label": "Rebounds", "value": "TRB"},
+                            {"label": "Assists", "value": "AST"},
+                            {"label": "Steals", "value": "STL"},
+                            {"label": "Blocks", "value": "BLK"},
+                            {"label": "Turnovers", "value": "TOV"},
+                            {"label": "Minutes", "value": "MP"},
+                            {"label": "FG%", "value": "FG%"},
+                            {"label": "3P%", "value": "3P%"},
+                            {"label": "FT%", "value": "FT%"},
                         ],
-                        value="WS",
+                        value="PTS",
                         clearable=False,
                     ),
                 ], md=4),
@@ -136,13 +100,13 @@ def league_layout() -> html.Div:
 
 
 def player_layout() -> html.Div:
-    adv = load("player_advanced")
+    import pandas as pd
+    pg = load("player_per_game")
     player_options = []
-    if not adv.empty:
-        import pandas as pd
-        adv = adv[adv["Player"] != "Player"]
-        for _, row in adv.iterrows():
-            if pd.notna(row.get("Player")) and row.get("Team") != "TOT":
+    if not pg.empty:
+        pg = pg[pg["Player"] != "Player"]
+        for _, row in pg.iterrows():
+            if pd.notna(row.get("Player")) and row.get("Team") not in ("TOT", "Team"):
                 player_options.append({
                     "label": f"{row['Player']} ({row['Team']})",
                     "value": f"{row['Player']}|{row['Team']}",
@@ -151,11 +115,29 @@ def player_layout() -> html.Div:
     return html.Div([
         dbc.Container([
             dbc.Row(dbc.Col(html.H2("Player Deep Dive"))),
-            dbc.Row(dbc.Col(
-                dcc.Dropdown(id="player-select", placeholder="Search for a player...",
-                             options=player_options, clearable=False),
-                md=5, className="mb-4"
-            )),
+            dbc.Row([
+                dbc.Col(
+                    dcc.Dropdown(id="player-select", placeholder="Search for a player...",
+                                 options=player_options, clearable=False),
+                    md=5,
+                ),
+                dbc.Col(
+                    dcc.Dropdown(
+                        id="player-split",
+                        options=[
+                            {"label": "All games", "value": "all"},
+                            {"label": "vs. teams above .500", "value": "above500"},
+                            {"label": "vs. teams below .500", "value": "below500"},
+                            {"label": "Home games", "value": "home"},
+                            {"label": "Away games", "value": "away"},
+                        ],
+                        value="all",
+                        clearable=False,
+                    ),
+                    md=4,
+                ),
+            ], className="mb-4"),
+            dbc.Row(dbc.Col(html.Div(id="player-split-summary"), className="mb-3")),
             dbc.Row([
                 dbc.Col(dcc.Graph(id="player-ts-chart"), md=6),
                 dbc.Col(dcc.Graph(id="player-usage-chart"), md=6),
@@ -166,10 +148,10 @@ def player_layout() -> html.Div:
 
 
 def team_layout() -> html.Div:
-    adv = load("player_advanced")
+    pg = load("player_per_game")
     team_options = []
-    if not adv.empty:
-        teams = sorted(t for t in adv["Team"].dropna().unique() if t not in ("TOT", "Team"))
+    if not pg.empty:
+        teams = sorted(t for t in pg["Team"].dropna().unique() if t not in ("TOT", "Team"))
         team_options = [{"label": t, "value": t} for t in teams]
 
     return html.Div([
