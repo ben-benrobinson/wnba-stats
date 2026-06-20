@@ -1,5 +1,6 @@
 import dash_bootstrap_components as dbc
 from dash import dcc, html
+from data.store import load
 
 NAVBAR = dbc.NavbarSimple(
     brand="WNBA Stats",
@@ -37,13 +38,17 @@ def league_layout() -> html.Div:
                         id="league-sort",
                         options=[
                             {"label": "Win Shares", "value": "WS"},
+                            {"label": "Win Shares per 40 min", "value": "WS/40"},
                             {"label": "True Shooting % (Bayesian)", "value": "TS_POSTERIOR"},
                             {"label": "Usage vs Efficiency", "value": "USG%"},
+                            {"label": "Player Efficiency Rating", "value": "PER"},
+                            {"label": "Offensive Rating", "value": "ORtg"},
+                            {"label": "Net Rating (ORtg - DRtg)", "value": "NET_RTG"},
                         ],
                         value="WS",
                         clearable=False,
                     ),
-                ], md=3),
+                ], md=4),
                 dbc.Col([
                     html.Label("Min games played"),
                     dcc.Slider(id="league-min-gp", min=1, max=20, step=1, value=5,
@@ -57,12 +62,24 @@ def league_layout() -> html.Div:
 
 
 def player_layout() -> html.Div:
+    adv = load("player_advanced")
+    player_options = []
+    if not adv.empty:
+        import pandas as pd
+        adv = adv[adv["Player"] != "Player"]
+        for _, row in adv.iterrows():
+            if pd.notna(row.get("Player")) and row.get("Team") != "TOT":
+                player_options.append({
+                    "label": f"{row['Player']} ({row['Team']})",
+                    "value": f"{row['Player']}|{row['Team']}",
+                })
+
     return html.Div([
         dbc.Container([
             dbc.Row(dbc.Col(html.H2("Player Deep Dive"))),
             dbc.Row(dbc.Col(
                 dcc.Dropdown(id="player-select", placeholder="Search for a player...",
-                             clearable=False),
+                             options=player_options, clearable=False),
                 md=5, className="mb-4"
             )),
             dbc.Row([
@@ -75,11 +92,18 @@ def player_layout() -> html.Div:
 
 
 def team_layout() -> html.Div:
+    adv = load("player_advanced")
+    team_options = []
+    if not adv.empty:
+        teams = sorted(t for t in adv["Team"].dropna().unique() if t not in ("TOT", "Team"))
+        team_options = [{"label": t, "value": t} for t in teams]
+
     return html.Div([
         dbc.Container([
-            dbc.Row(dbc.Col(html.H2("Team — On/Off Impact"))),
+            dbc.Row(dbc.Col(html.H2("Team — Player Impact"))),
             dbc.Row(dbc.Col(
-                dcc.Dropdown(id="team-select", placeholder="Select a team...", clearable=False),
+                dcc.Dropdown(id="team-select", placeholder="Select a team...",
+                             options=team_options, clearable=False),
                 md=4, className="mb-4"
             )),
             dbc.Row(dbc.Col(dcc.Graph(id="team-onoff-chart"))),

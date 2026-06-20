@@ -65,21 +65,20 @@ def register_callbacks(app) -> None:
         if adv.empty:
             return _empty_fig("No data yet — run the nightly refresh."), ""
 
-        df = adv.copy()
-        df = df[df["G"] >= min_gp].copy()
+        df = adv[adv["G"] >= min_gp].copy()
+
+        # Compute NET_RTG
+        df["NET_RTG"] = (
+            pd.to_numeric(df["ORtg"], errors="coerce") -
+            pd.to_numeric(df["DRtg"], errors="coerce")
+        )
 
         # Bayesian TS% using season totals
         if not tot.empty:
-            merged = df.merge(
-                tot[["Player", "Team", "PTS", "FGA", "FTA"]].rename(
-                    columns={"Player": "Player", "Team": "Team"}
-                ),
-                on=["Player", "Team"], how="left"
-            )
-            ts_raw = pd.to_numeric(df.get("TS%", pd.Series(dtype=float)), errors="coerce")
-            fga = pd.to_numeric(merged.get("FGA", pd.Series(dtype=float)), errors="coerce").fillna(0)
-            fta = pd.to_numeric(merged.get("FTA", pd.Series(dtype=float)), errors="coerce").fillna(0)
-            pts = pd.to_numeric(merged.get("PTS", pd.Series(dtype=float)), errors="coerce").fillna(0)
+            merged = df.merge(tot[["Player", "Team", "PTS", "FGA", "FTA"]], on=["Player", "Team"], how="left")
+            fga = pd.to_numeric(merged.get("FGA"), errors="coerce").fillna(0)
+            fta = pd.to_numeric(merged.get("FTA"), errors="coerce").fillna(0)
+            pts = pd.to_numeric(merged.get("PTS"), errors="coerce").fillna(0)
             attempts = 2 * (fga + 0.44 * fta)
             makes = pts / 2
             ts_bayes = shrink_shooting(makes, attempts / 2, league_mean=LEAGUE_AVG_TS / 2)
@@ -91,30 +90,22 @@ def register_callbacks(app) -> None:
             df["TS_CI_LOW"] = df["TS_POSTERIOR"]
             df["TS_CI_HIGH"] = df["TS_POSTERIOR"]
 
-        df = df.sort_values(sort_col, ascending=False).head(30)
+        sort_actual = "NET_RTG" if sort_col == "NET_RTG" else sort_col
+        df = df.sort_values(sort_actual, ascending=False, na_position="last").head(50)
 
         if sort_col == "WS":
             fig = _win_shares_chart(df)
         elif sort_col == "TS_POSTERIOR":
             fig = _ts_chart(df)
-        else:
+        elif sort_col in ("USG%",):
             fig = _usage_efficiency_chart(df)
+        else:
+            fig = _generic_bar_chart(df, sort_actual)
 
         table = _summary_table(df)
         return fig, table
 
     # ── Player view ───────────────────────────────────────────────────────────
-    @app.callback(Output("player-select", "options"), Input("url", "pathname"))
-    def populate_player_dropdown(_):
-        adv = _load_advanced()
-        if adv.empty:
-            return []
-        return [
-            {"label": f"{row['Player']} ({row['Team']})", "value": f"{row['Player']}|{row['Team']}"}
-            for _, row in adv.iterrows()
-            if pd.notna(row.get("Player"))
-        ]
-
     @app.callback(
         Output("player-ts-chart", "figure"),
         Output("player-usage-chart", "figure"),
@@ -141,14 +132,6 @@ def register_callbacks(app) -> None:
         return ts_fig, usage_fig, profile_fig
 
     # ── Team view ─────────────────────────────────────────────────────────────
-    @app.callback(Output("team-select", "options"), Input("url", "pathname"))
-    def populate_team_dropdown(_):
-        adv = _load_advanced()
-        if adv.empty:
-            return []
-        teams = sorted(adv["Team"].dropna().unique())
-        return [{"label": t, "value": t} for t in teams if t != "TOT"]
-
     @app.callback(Output("team-onoff-chart", "figure"), Input("team-select", "value"))
     def update_team(team):
         if not team:
@@ -214,6 +197,28 @@ def _ts_chart(df: pd.DataFrame) -> go.Figure:
         title="True Shooting % — Bayesian Posterior with 90% CI",
         xaxis_title="TS%", xaxis_tickformat=".0%",
         template="plotly_dark", height=700, margin=dict(l=160),
+    )
+    return fig
+
+
+def _generic_bar_chart(df: pd.DataFrame, col: str) -> go.Figure:
+    labels = {
+        "WS/40": "Win Shares per 40 min",
+        "PER": "Player Efficiency Rating",
+        "ORtg": "Offensive Rating (pts/100 poss)",
+        "NET_RTG": "Net Rating (ORtg − DRtg)",
+    }
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df[col], y=df["Player"], orientation="h",
+        marker_color=BLUE,
+        customdata=df[["Team", "G"]],
+        hovertemplate="<b>%{y}</b><br>%{customdata[0]} · %{customdata[1]} GP<br>" + labels.get(col, col) + ": %{x:.2f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=f"Top 50 — {labels.get(col, col)}",
+        xaxis_title=labels.get(col, col),
+        template="plotly_dark", height=900, margin=dict(l=160),
     )
     return fig
 
@@ -339,9 +344,13 @@ def _player_profile_chart(player_adv: pd.DataFrame, player_tot: pd.DataFrame, na
 
 
 def _summary_table(df: pd.DataFrame):
-    cols = ["Player", "Team", "G", "WS", "TS_POSTERIOR", "USG%", "PER"]
+    cols = ["Player", "Team", "G", "WS", "WS/40", "TS_POSTERIOR", "USG%", "PER", "ORtg", "DRtg", "NET_RTG", "OWS", "DWS"]
     display = df[[c for c in cols if c in df.columns]].copy()
-    display = display.rename(columns={"TS_POSTERIOR": "TS% (posterior)", "USG%": "USG%"})
+    display = display.rename(columns={
+        "TS_POSTERIOR": "TS% (Bayes)",
+        "NET_RTG": "Net Rtg",
+        "WS/40": "WS/40",
+    })
     for c in display.select_dtypes("float").columns:
         display[c] = display[c].round(3)
 
