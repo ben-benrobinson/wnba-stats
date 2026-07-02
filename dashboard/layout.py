@@ -28,6 +28,7 @@ NAVBAR = dbc.NavbarSimple(
         dbc.NavItem(dbc.NavLink("Player", href="/player")),
         dbc.NavItem(dbc.NavLink("Team", href="/team")),
         dbc.NavItem(dbc.NavLink("Scatter", href="/scatter")),
+        dbc.NavItem(dbc.NavLink("Game Log", href="/gamelog")),
     ],
 )
 
@@ -284,6 +285,44 @@ _STAT_OPTIONS = [
     {"label": "3P%", "value": "3P%"},
     {"label": "FT%", "value": "FT%"},
 ]
+
+
+def game_scatter_layout() -> html.Div:
+    pg = load("player_per_game")
+    player_options = []
+    if not pg.empty:
+        pg = pg[pg["Player"] != "Player"]
+        for _, row in pg.iterrows():
+            if pd.notna(row.get("Player")) and row.get("Team") not in ("TOT", "Team"):
+                player_options.append({
+                    "label": f"{row['Player']} ({row['Team']})",
+                    "value": f"{row['Player']}|{row['Team']}",
+                })
+
+    return html.Div([
+        dbc.Container([
+            dbc.Row(dbc.Col(html.H2("Game Log Scatter"))),
+            dbc.Row([
+                dbc.Col([
+                    html.Label("Player", className="small text-muted"),
+                    dcc.Dropdown(id="gs-player", placeholder="Search for a player...",
+                                 options=player_options, clearable=False),
+                ], md=4),
+                dbc.Col([
+                    html.Label("X axis", className="small text-muted"),
+                    dcc.Dropdown(id="gs-x", options=_STAT_OPTIONS, value="PTS", clearable=False),
+                ], md=2),
+                dbc.Col([
+                    html.Label("Y axis", className="small text-muted"),
+                    dcc.Dropdown(id="gs-y", options=_STAT_OPTIONS, value="AST", clearable=False),
+                ], md=2),
+            ], className="mb-3"),
+            dbc.Row(dbc.Col(dcc.Graph(
+                id="gs-chart",
+                figure=_placeholder_fig("Select a player and two stats to see their game log", height=550),
+            ))),
+        ]),
+    ])
 
 
 def scatter_layout() -> html.Div:

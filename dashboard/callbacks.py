@@ -42,7 +42,7 @@ def _load_per_game() -> pd.DataFrame:
 
 def register_callbacks(app) -> None:
 
-    from dashboard.layout import league_layout, player_layout, team_layout, scatter_layout
+    from dashboard.layout import league_layout, player_layout, team_layout, scatter_layout, game_scatter_layout
 
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def render_page(pathname):
@@ -52,6 +52,8 @@ def register_callbacks(app) -> None:
             return team_layout()
         if pathname == "/scatter":
             return scatter_layout()
+        if pathname == "/gamelog":
+            return game_scatter_layout()
         return league_layout()
 
     # ── League view ───────────────────────────────────────────────────────────
@@ -104,6 +106,31 @@ def register_callbacks(app) -> None:
         context_fig = _player_context(player_row, name, percentile_pool, min_mp or 0)
         summary = _split_summary(player_row, player_logs, name, split)
         return bar_fig, shooting_fig, context_fig, summary
+
+    # ── Game log scatter ──────────────────────────────────────────────────────
+    @app.callback(
+        Output("gs-chart", "figure"),
+        Input("gs-player", "value"),
+        Input("gs-x", "value"),
+        Input("gs-y", "value"),
+    )
+    def update_game_scatter(player_key, x_col, y_col):
+        if not player_key or not x_col or not y_col:
+            raise PreventUpdate
+        name, team = player_key.split("|", 1)
+        gamelogs = load("player_gamelogs")
+        if gamelogs.empty:
+            return _empty_fig("No game log data yet — run the nightly refresh.")
+        df = gamelogs[gamelogs["Player"] == name].copy()
+        if df.empty:
+            return _empty_fig(f"No game log data found for {name}.")
+        for col in STAT_COLS + ["Result"]:
+            if col in df.columns and col != "Result":
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=[x_col, y_col, "Result"])
+        if df.empty:
+            return _empty_fig(f"No complete game records for {name} with {x_col} and {y_col}.")
+        return _game_scatter_chart(df, name, team, x_col, y_col)
 
     # ── Scatter view ──────────────────────────────────────────────────────────
     @app.callback(
@@ -591,6 +618,66 @@ def _team_chart(roster: pd.DataFrame, team: str, stat_col: str = "PTS", subtitle
         xaxis_title=label,
         xaxis_tickformat=tick_fmt,
         template="plotly_dark", height=500, margin=dict(l=160),
+    )
+    return fig
+
+
+def _game_scatter_chart(df: pd.DataFrame, name: str, team: str, x_col: str, y_col: str) -> go.Figure:
+    x_label = STAT_LABELS.get(x_col, x_col)
+    y_label = STAT_LABELS.get(y_col, y_col)
+    team_color = TEAM_COLORS.get(team, BLUE)
+
+    wins = df[df["Result"] == "W"]
+    losses = df[df["Result"] == "L"]
+
+    def hover(row):
+        date = row.get("Date", "")
+        opp = row.get("Opp", "")
+        home_away = row.get("HomeAway", "")
+        loc = f"{'vs.' if home_away == 'Home' else '@'} {opp}" if opp else ""
+        return (
+            f"<b>{date} {loc}</b><br>"
+            f"{x_label}: {_fmt(x_col, row[x_col])}<br>"
+            f"{y_label}: {_fmt(y_col, row[y_col])}<br>"
+            f"{'Win' if row['Result'] == 'W' else 'Loss'}"
+        )
+
+    fig = go.Figure()
+    for result_df, label, color, symbol in [
+        (wins, "Win", "#2ecc71", "circle"),
+        (losses, "Loss", "#e74c3c", "circle"),
+    ]:
+        if result_df.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=result_df[x_col],
+            y=result_df[y_col],
+            mode="markers",
+            name=label,
+            marker=dict(
+                color=color, size=12, opacity=0.85,
+                line=dict(width=1, color="rgba(255,255,255,0.4)"),
+                symbol=symbol,
+            ),
+            hovertext=[hover(row) for _, row in result_df.iterrows()],
+            hovertemplate="%{hovertext}<extra></extra>",
+        ))
+
+    n_wins = len(wins)
+    n_losses = len(losses)
+    fig.update_layout(
+        title=(
+            f"{name} — {x_label} vs. {y_label} by Game"
+            f"<br><sup style='color:{team_color}'>{team}</sup>"
+            f"<sup>  ·  {n_wins}W – {n_losses}L in games with data</sup>"
+        ),
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        xaxis_tickformat=".0%" if x_col in PCT_STATS else "",
+        yaxis_tickformat=".0%" if y_col in PCT_STATS else "",
+        template="plotly_dark",
+        height=560,
+        legend=dict(title="Result", orientation="v"),
     )
     return fig
 
