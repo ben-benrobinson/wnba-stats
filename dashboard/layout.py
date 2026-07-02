@@ -288,6 +288,7 @@ _STAT_OPTIONS = [
 
 
 def game_scatter_layout() -> html.Div:
+    import pandas as pd
     pg = load("player_per_game")
     player_options = []
     if not pg.empty:
