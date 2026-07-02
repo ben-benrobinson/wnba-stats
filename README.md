@@ -1,25 +1,21 @@
 # WNBA Stats
 
-A statistically rigorous WNBA performance dashboard answering one core question: **how important is this player to their team?**
+A WNBA stats dashboard for digging into player and team performance — sortable league
+leaderboards, per-player splits (opponent quality, home/away, date range), and
+team-level filtering by opponent.
 
 ## What it does
 
-| Metric | Method | Why it matters |
-|--------|--------|----------------|
-| **Win Shares** | Box-score estimate of wins produced | Single number for player importance |
-| **True Shooting % (Bayesian)** | Beta-Binomial posterior with 90% CI | Early-season TS% is noise — this shows how confident to be |
-| **On/Off Net Rating** | Points-per-100-poss with/without player | Does the team actually perform better with them on the floor? |
-| **On/Off CI** | Normal approximation, 90% CI | Gold bars = statistically meaningful signal |
-
-## Dashboard tabs
-
-- **League** — top 30 players ranked by Win Shares, TS%, or On/Off delta
-- **Player** — drill into any player: cumulative TS% with shrinking uncertainty, usage vs. efficiency scatter, points trend
-- **Team** — on/off impact waterfall per roster showing who the team can't afford to lose
+- **League** — leaderboard across PTS, TRB, AST, STL, BLK, TOV, MP, FG%, 3P%, FT%
+- **Player** — per-game stat table, shooting splits vs. league average, league
+  percentile rank (filterable by minutes played), and game-log splits (vs. teams
+  above/below .500, home/away)
+- **Team** — roster stats filterable by opponent quality, specific opponents, and date
 
 ## Data
 
-Pulled from basketball-reference.com. Refreshed nightly via cron after games complete. Stored in SQLite locally.
+Pulled from basketball-reference.com (box scores + game logs). Refreshed nightly via
+cron after games complete. Stored in SQLite locally.
 
 ## Running locally
 
@@ -35,7 +31,7 @@ See [DEPLOY.md](DEPLOY.md) for EC2 + Nginx + Gunicorn setup.
 
 ## Roadmap
 
-- [ ] Play-by-play data (shot quality, RAPM)
-- [ ] Season-over-season player development curves
-- [ ] Lineup analysis (5-player unit net ratings)
-- [ ] Plus/minus (+/-) — raw and adjusted
+- [ ] Advanced/derived stats (Win Shares, PER, on/off net rating) — revisit once the
+      basics are solid
+- [ ] Consistency / variance scoring across games
+- [ ] Play-by-play data (shot quality)

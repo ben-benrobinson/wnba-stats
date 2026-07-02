@@ -46,6 +46,13 @@ def fetch_player_per_game() -> pd.DataFrame:
     """Per-game averages for all players this season."""
     url = f"{BASE_URL}/years/{CURRENT_SEASON}_per_game.html"
     df = _get_table(url, "per_game")
+    # bref's per_game table has two columns named "MP" (season total) and "G"
+    # (also duplicated); pandas renames the second occurrence to "MP.1" / "G.1".
+    # The ".1" versions are the actual per-game figures we want — drop the totals.
+    if "MP.1" in df.columns:
+        df = df.drop(columns=["MP"]).rename(columns={"MP.1": "MP"})
+    if "G.1" in df.columns:
+        df = df.drop(columns=["G.1"])
     df["SEASON"] = CURRENT_SEASON
     return df
 
@@ -153,6 +160,22 @@ def fetch_player_gamelog(player_id: str, player_name: str) -> pd.DataFrame:
     # Drop rows where player didn't play (MP is non-numeric like "Did Not Play")
     if "MP" in df.columns:
         df = df[pd.to_numeric(df["MP"].astype(str).str.replace(":", "."), errors="coerce").notna()].reset_index(drop=True)
+
+    # MP is "MM:SS" (e.g. "30:18") — convert to decimal minutes
+    if "MP" in df.columns:
+        def _mp_to_minutes(val):
+            s = str(val).strip()
+            if ":" in s:
+                mins, secs = s.split(":", 1)
+                try:
+                    return int(mins) + int(secs) / 60
+                except ValueError:
+                    return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        df["MP"] = df["MP"].apply(_mp_to_minutes)
 
     # Unnamed: 4 = home/away (NaN = home, "@" = away)
     if "Unnamed: 4" in df.columns:

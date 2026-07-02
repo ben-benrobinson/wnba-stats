@@ -1,7 +1,8 @@
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from dash import Input, Output, dash_table
+import dash_bootstrap_components as dbc
+from dash import Input, Output, dash_table, html
 from dash.exceptions import PreventUpdate
 
 from data.store import load
@@ -41,7 +42,7 @@ def _load_per_game() -> pd.DataFrame:
 
 def register_callbacks(app) -> None:
 
-    from dashboard.layout import league_layout, player_layout, team_layout
+    from dashboard.layout import league_layout, player_layout, team_layout, scatter_layout
 
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def render_page(pathname):
@@ -49,6 +50,8 @@ def register_callbacks(app) -> None:
             return player_layout()
         if pathname == "/team":
             return team_layout()
+        if pathname == "/scatter":
+            return scatter_layout()
         return league_layout()
 
     # ── League view ───────────────────────────────────────────────────────────
@@ -72,14 +75,15 @@ def register_callbacks(app) -> None:
 
     # ── Player view ───────────────────────────────────────────────────────────
     @app.callback(
-        Output("player-ts-chart", "figure"),
+        Output("player-ts-chart", "children"),
         Output("player-usage-chart", "figure"),
         Output("player-trend-chart", "figure"),
         Output("player-split-summary", "children"),
         Input("player-select", "value"),
         Input("player-split", "value"),
+        Input("player-min-mp", "value"),
     )
-    def update_player(player_key, split):
+    def update_player(player_key, split, min_mp):
         if not player_key:
             raise PreventUpdate
         name, team = player_key.split("|", 1)
@@ -89,6 +93,7 @@ def register_callbacks(app) -> None:
 
         player_row = pg[(pg["Player"] == name) & (pg["Team"] == team)]
         league = pg[pg["G"] >= 5]
+        percentile_pool = pg[pg["MP"] >= (min_mp or 0)]
 
         # Load game logs and apply split filter
         gamelogs = load("player_gamelogs")
@@ -96,22 +101,188 @@ def register_callbacks(app) -> None:
 
         bar_fig = _player_bar(player_row, player_logs, name, team, split)
         shooting_fig = _player_shooting(player_row, name, league)
-        context_fig = _player_context(player_row, name, league)
+        context_fig = _player_context(player_row, name, percentile_pool, min_mp or 0)
         summary = _split_summary(player_row, player_logs, name, split)
         return bar_fig, shooting_fig, context_fig, summary
 
+    # ── Scatter view ──────────────────────────────────────────────────────────
+    @app.callback(
+        Output("scatter-chart", "figure"),
+        Input("scatter-x", "value"),
+        Input("scatter-y", "value"),
+        Input("scatter-quality-filter", "value"),
+        Input("scatter-opp-select", "value"),
+        Input("scatter-date-from", "date"),
+        Input("scatter-min-gp", "value"),
+    )
+    def update_scatter(x_col, y_col, quality_filter, specific_opps, date_from, min_gp):
+        if not x_col or not y_col:
+            raise PreventUpdate
+
+        gamelogs = load("player_gamelogs")
+        pg = _load_per_game()
+
+        # If any game-log filter is active, aggregate from game logs
+        use_gamelogs = (
+            not gamelogs.empty
+            and (specific_opps or (quality_filter and quality_filter != "all") or date_from)
+        )
+
+        if use_gamelogs:
+            for col in STAT_COLS:
+                if col in gamelogs.columns:
+                    gamelogs[col] = pd.to_numeric(gamelogs[col], errors="coerce")
+
+            filtered = gamelogs.copy()
+
+            if specific_opps:
+                filtered = filtered[filtered["Opp"].isin(specific_opps)]
+            elif quality_filter and quality_filter != "all":
+                if quality_filter in ("above500", "below500"):
+                    win_pcts = _team_win_pcts()
+                    if win_pcts and "Opp" in filtered.columns:
+                        filtered["opp_wpct"] = filtered["Opp"].map(win_pcts)
+                        filtered = filtered[filtered["opp_wpct"] > 0.5] if quality_filter == "above500" \
+                            else filtered[filtered["opp_wpct"] <= 0.5]
+                elif quality_filter == "home":
+                    filtered = filtered[filtered.get("HomeAway", pd.Series()) == "Home"]
+                elif quality_filter == "away":
+                    filtered = filtered[filtered.get("HomeAway", pd.Series()) == "Away"]
+
+            if date_from and "Date" in filtered.columns:
+                filtered["_date"] = pd.to_datetime(filtered["Date"], errors="coerce")
+                filtered = filtered[filtered["_date"] >= pd.to_datetime(date_from)]
+
+            avg_cols = [c for c in STAT_COLS if c in filtered.columns]
+            if filtered.empty or x_col not in avg_cols or y_col not in avg_cols:
+                return _empty_fig("No data for this filter combination.")
+
+            agg = filtered.groupby("Player")[avg_cols].mean().reset_index()
+            # Attach team from per_game (take first non-TOT occurrence)
+            team_map = (
+                pg[pg["Team"] != "TOT"]
+                .drop_duplicates("Player")[["Player", "Team"]]
+            )
+            agg = agg.merge(team_map, on="Player", how="left")
+            # Game count filter
+            gp = filtered.groupby("Player")["Date"].nunique().reset_index().rename(columns={"Date": "GP"})
+            agg = agg.merge(gp, on="Player")
+            agg = agg[agg["GP"] >= (min_gp or 1)]
+            subtitle = _scatter_subtitle(quality_filter, specific_opps, date_from)
+        else:
+            # Use season averages
+            if pg.empty:
+                return _empty_fig("No data yet.")
+            agg = pg[pg["Team"] != "TOT"].copy()
+            if "G" in agg.columns:
+                agg = agg[agg["G"] >= (min_gp or 1)]
+            agg = agg.rename(columns={"G": "GP"})
+            subtitle = "Season averages"
+
+        if x_col not in agg.columns or y_col not in agg.columns:
+            return _empty_fig(f"Missing column(s): {x_col}, {y_col}")
+
+        return _scatter_chart(agg, x_col, y_col, subtitle)
+
     # ── Team view ─────────────────────────────────────────────────────────────
-    @app.callback(Output("team-onoff-chart", "figure"), Input("team-select", "value"))
-    def update_team(team):
+    @app.callback(
+        Output("team-opp-select", "options"),
+        Input("team-select", "value"),
+    )
+    def populate_opp_options(team):
+        if not team:
+            return []
+        gamelogs = load("player_gamelogs")
+        if gamelogs.empty or "Opp" not in gamelogs.columns:
+            return []
+        opps = sorted(gamelogs[gamelogs["Tm"] == team]["Opp"].dropna().unique())
+        return [{"label": o, "value": o} for o in opps]
+
+    @app.callback(
+        Output("team-onoff-chart", "figure"),
+        Output("team-filter-summary", "children"),
+        Input("team-select", "value"),
+        Input("team-quality-filter", "value"),
+        Input("team-opp-select", "value"),
+        Input("team-date-from", "date"),
+        Input("team-stat-select", "value"),
+    )
+    def update_team(team, quality_filter, specific_opps, date_from, stat_col):
         if not team:
             raise PreventUpdate
-        df = _load_per_game()
-        if df.empty:
-            return _empty_fig("No data available.")
+        stat_col = stat_col or "PTS"
 
-        roster = df[(df["Team"] == team) & (df["G"] >= 3)].copy()
-        roster = roster.sort_values("MP", ascending=True)
-        return _team_chart(roster, team)
+        gamelogs = load("player_gamelogs")
+        pg = _load_per_game()
+
+        # Try game-log-based view first
+        if not gamelogs.empty and "Tm" in gamelogs.columns:
+            team_logs = gamelogs[gamelogs["Tm"] == team].copy()
+            for col in ["PTS", "TRB", "AST", "STL", "BLK", "TOV", "MP", "FG%", "3P%", "FT%"]:
+                if col in team_logs.columns:
+                    team_logs[col] = pd.to_numeric(team_logs[col], errors="coerce")
+
+            # Apply opponent filter — specific opponents take priority
+            filtered = team_logs
+            filter_parts = []
+            if specific_opps:
+                filtered = team_logs[team_logs["Opp"].isin(specific_opps)]
+                filter_parts.append(f"vs. {', '.join(specific_opps)}")
+            elif quality_filter and quality_filter != "all":
+                if quality_filter in ("above500", "below500"):
+                    win_pcts = _team_win_pcts()
+                    if win_pcts and "Opp" in filtered.columns:
+                        filtered = filtered.copy()
+                        filtered["opp_wpct"] = filtered["Opp"].map(win_pcts)
+                        filtered = filtered[filtered["opp_wpct"] > 0.5] if quality_filter == "above500" \
+                            else filtered[filtered["opp_wpct"] <= 0.5]
+                        filter_parts.append("vs. teams above .500" if quality_filter == "above500"
+                                            else "vs. teams below .500")
+                elif quality_filter == "home":
+                    filtered = team_logs[team_logs.get("HomeAway", pd.Series()) == "Home"]
+                    filter_parts.append("Home games")
+                elif quality_filter == "away":
+                    filtered = team_logs[team_logs.get("HomeAway", pd.Series()) == "Away"]
+                    filter_parts.append("Away games")
+
+            # Apply date filter
+            if date_from and "Date" in filtered.columns:
+                filtered = filtered.copy()
+                filtered["_date"] = pd.to_datetime(filtered["Date"], errors="coerce")
+                filtered = filtered[filtered["_date"] >= pd.to_datetime(date_from)]
+                filter_parts.append(f"since {date_from}")
+
+            filter_label = " · ".join(filter_parts) if filter_parts else "All games"
+            n_games = filtered["Date"].nunique() if "Date" in filtered.columns else len(filtered) // 10
+            record = _team_record(filtered, team)
+            summary = _team_filter_summary(team, filter_label, n_games, quality_filter, specific_opps, record)
+
+            if not filtered.empty:
+                # Average per-game stats per player across filtered games
+                avg_cols = [c for c in ["PTS", "TRB", "AST", "STL", "BLK", "TOV", "MP", "FG%", "3P%", "FT%"]
+                           if c in filtered.columns]
+                avg = filtered.groupby("Player")[avg_cols].mean().reset_index()
+                # Add game count per player
+                if "Date" in filtered.columns:
+                    gp = filtered.groupby("Player")["Date"].nunique().reset_index()\
+                        .rename(columns={"Date": "GP"})
+                    avg = avg.merge(gp, on="Player")
+                avg["Team"] = team
+                if stat_col in avg.columns:
+                    avg = avg.sort_values(stat_col, ascending=True)
+                    return _team_chart(avg, team, stat_col, filter_label), summary
+                return _empty_fig(f"No {stat_col} data for this filter."), summary
+
+        # Fallback: season averages from per_game table
+        if pg.empty:
+            return _empty_fig("No data available."), ""
+        roster = pg[(pg["Team"] == team) & (pg["G"] >= 3)].copy()
+        if stat_col not in roster.columns:
+            return _empty_fig(f"No {stat_col} data available."), ""
+        roster = roster.sort_values(stat_col, ascending=True)
+        summary = html.Small("Game log data not yet available — showing season averages.",
+                             className="text-muted")
+        return _team_chart(roster, team, stat_col, "Season averages"), summary
 
 
 # ── Chart builders ────────────────────────────────────────────────────────────
@@ -159,13 +330,19 @@ def _team_win_pcts() -> dict[str, float]:
     standings = load("team_standings")
     if standings.empty:
         return {}
+    # Standings uses full names; gamelogs use abbreviations — invert TEAM_NAMES to map back
+    name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
     result = {}
     for _, row in standings.iterrows():
-        team = str(row.get("Tm", row.get("Team", ""))).strip()
-        w = pd.to_numeric(row.get("W"), errors="coerce")
-        l = pd.to_numeric(row.get("L"), errors="coerce")
-        if pd.notna(w) and pd.notna(l) and (w + l) > 0:
-            result[team] = w / (w + l)
+        full_name = str(row.get("Team", row.get("Tm", ""))).strip()
+        abbrev = name_to_abbrev.get(full_name, full_name)
+        wpct = pd.to_numeric(row.get("W/L%"), errors="coerce")
+        if pd.isna(wpct):
+            w = pd.to_numeric(row.get("W"), errors="coerce")
+            l = pd.to_numeric(row.get("L"), errors="coerce")
+            wpct = w / (w + l) if pd.notna(w) and pd.notna(l) and (w + l) > 0 else None
+        if wpct is not None:
+            result[abbrev] = float(wpct)
     return result
 
 
@@ -251,38 +428,49 @@ def _split_summary(player_row: pd.DataFrame, player_logs: pd.DataFrame,
 
 
 def _player_bar(player_row: pd.DataFrame, player_logs: pd.DataFrame,
-                name: str, team: str, split: str = "all") -> go.Figure:
+                name: str, team: str, split: str = "all") -> object:
+    """Per-game stats table: season average, and the selected split if any."""
     if player_row.empty:
-        return _empty_fig("No data for this player.")
+        return html.Div("No data for this player.", className="text-muted")
+
     row = player_row.iloc[0]
     counting = ["PTS", "TRB", "AST", "STL", "BLK", "TOV", "MP"]
-    season_vals = [float(pd.to_numeric(row.get(c), errors="coerce") or 0) for c in counting]
-    color = TEAM_COLORS.get(team, BLUE)
+    season_vals = {c: pd.to_numeric(row.get(c), errors="coerce") for c in counting}
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        name="Season avg", x=counting, y=season_vals,
-        marker_color=color, opacity=0.5 if (split != "all" and not player_logs.empty) else 1.0,
-        hovertemplate="%{x}: %{y:.1f}<extra>Season avg</extra>",
-    ))
+    show_split = split != "all" and not player_logs.empty
+    split_vals = {c: player_logs[c].mean() if c in player_logs.columns else float("nan")
+                  for c in counting} if show_split else {}
 
-    if split != "all" and not player_logs.empty:
-        split_vals = [player_logs[c].mean() if c in player_logs.columns else 0 for c in counting]
-        fig.add_trace(go.Bar(
-            name=_split_label(split), x=counting, y=split_vals,
-            marker_color=color,
-            hovertemplate="%{x}: %{y:.1f}<extra>" + _split_label(split) + "</extra>",
-        ))
+    header_cells = [html.Th("Stat"), html.Th("Season Avg")]
+    if show_split:
+        header_cells.append(html.Th(_split_label(split)))
+
+    rows = []
+    for c in counting:
+        cells = [html.Td(c), html.Td(f"{season_vals[c]:.1f}" if pd.notna(season_vals[c]) else "—")]
+        if show_split:
+            sv = split_vals.get(c)
+            diff = sv - season_vals[c] if pd.notna(sv) and pd.notna(season_vals[c]) else None
+            cell_content = f"{sv:.1f}" if pd.notna(sv) else "—"
+            if diff is not None:
+                color = "limegreen" if (c != "TOV" and diff > 0) or (c == "TOV" and diff < 0) else "tomato"
+                arrow = "▲" if diff > 0 else "▼"
+                cell_content = html.Span([
+                    cell_content + " ",
+                    html.Span(f"{arrow}{abs(diff):.1f}", style={"color": color, "fontSize": "0.85em"}),
+                ])
+            cells.append(html.Td(cell_content))
+        rows.append(html.Tr(cells))
 
     title = f"{name} — Per-Game Stats"
-    if split != "all" and not player_logs.empty:
+    if show_split:
         title += f" ({_split_label(split)}, n={len(player_logs)})"
 
-    fig.update_layout(
-        title=title, barmode="group",
-        template="plotly_dark", height=320,
+    table = dbc.Table(
+        [html.Thead(html.Tr(header_cells)), html.Tbody(rows)],
+        bordered=False, hover=True, dark=True, responsive=True, className="mt-2",
     )
-    return fig
+    return html.Div([html.H5(title, className="mt-2"), table])
 
 
 def _player_shooting(player_row: pd.DataFrame, name: str, league: pd.DataFrame) -> go.Figure:
@@ -309,10 +497,12 @@ def _player_shooting(player_row: pd.DataFrame, name: str, league: pd.DataFrame) 
     return fig
 
 
-def _player_context(player_row: pd.DataFrame, name: str, league: pd.DataFrame) -> go.Figure:
-    """Where the player ranks in the league for each counting stat."""
+def _player_context(player_row: pd.DataFrame, name: str, league: pd.DataFrame, min_mp: float = 0) -> go.Figure:
+    """Where the player ranks among the filtered league pool for each counting stat."""
     if player_row.empty:
         return _empty_fig("No data.")
+    if league.empty:
+        return _empty_fig(f"No players average {min_mp}+ minutes per game.")
     row = player_row.iloc[0]
     cats = ["PTS", "TRB", "AST", "STL", "BLK"]
     pcts = []
@@ -330,31 +520,141 @@ def _player_context(player_row: pd.DataFrame, name: str, league: pd.DataFrame) -
         hovertemplate="%{x}: %{y:.0%} percentile<extra></extra>",
     ))
     fig.add_hline(y=0.5, line_dash="dash", line_color=GOLD, annotation_text="Median")
+    title = f"{name} — League Percentile Rank"
+    if min_mp:
+        title += f"<br><sup>vs. players averaging {min_mp}+ MPG (n={len(league)})</sup>"
     fig.update_layout(
-        title=f"{name} — League Percentile Rank",
+        title=title,
         yaxis_tickformat=".0%", yaxis_range=[0, 1],
-        template="plotly_dark", height=300,
+        template="plotly_dark", height=320,
     )
     return fig
 
 
-def _team_chart(roster: pd.DataFrame, team: str) -> go.Figure:
+def _team_record(filtered: pd.DataFrame, team: str) -> str | None:
+    """W-L record for the team across the filtered games (one row per game per player)."""
+    if filtered.empty or "Date" not in filtered.columns or "Result" not in filtered.columns:
+        return None
+    games = filtered.drop_duplicates(subset=["Date"])
+    wins = int((games["Result"] == "W").sum())
+    losses = int((games["Result"] == "L").sum())
+    if wins + losses == 0:
+        return None
+    return f"{wins}-{losses}"
+
+
+def _team_filter_summary(team: str, filter_label: str, n_games: int,
+                          quality_filter: str, specific_opps: list, record: str | None = None) -> object:
+    from dash import html
+    import dash_bootstrap_components as dbc
+    if filter_label == "All games":
+        return ""
+    games_text = f"{n_games} game{'s' if n_games != 1 else ''}"
+    if record:
+        games_text += f" ({record})"
+    return dbc.Card(dbc.CardBody(
+        html.Span([
+            html.B(f"{TEAM_NAMES.get(team, team)}"),
+            f" — {filter_label} · {games_text}",
+        ])
+    ), className="mb-2 bg-dark border-secondary")
+
+
+def _team_chart(roster: pd.DataFrame, team: str, stat_col: str = "PTS", subtitle: str = "") -> go.Figure:
     color = TEAM_COLORS.get(team, BLUE)
-    hovers = [
-        f"<b>{row['Player']}</b><br>{int(row['G'])} GP · {row['MP']:.1f} MPG<br>PTS: {row['PTS']:.1f} · REB: {row['TRB']:.1f} · AST: {row['AST']:.1f}"
-        for _, row in roster.iterrows()
-    ]
+    label = STAT_LABELS.get(stat_col, stat_col)
+    gp_col = "GP" if "GP" in roster.columns else "G"
+    hovers = []
+    for _, row in roster.iterrows():
+        gp = int(row[gp_col]) if gp_col in row and pd.notna(row[gp_col]) else "?"
+        mp = f"{row['MP']:.1f}" if "MP" in row and pd.notna(row.get("MP")) else "—"
+        stat_val = _fmt(stat_col, row[stat_col]) if pd.notna(row.get(stat_col)) else "—"
+        hovers.append(
+            f"<b>{row['Player']}</b><br>{gp} GP · {mp} MPG"
+            f"<br>{label}: {stat_val}"
+        )
+
+    title = f"{TEAM_NAMES.get(team, team)} — {label} by Player"
+    if subtitle and subtitle != "Season averages":
+        title += f"<br><sup>{subtitle}</sup>"
+
+    tick_fmt = ".0%" if stat_col in PCT_STATS else ""
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=roster["PTS"], y=roster["Player"], orientation="h",
+        x=roster[stat_col], y=roster["Player"], orientation="h",
         marker_color=color,
         hovertext=hovers,
         hovertemplate="%{hovertext}<extra></extra>",
     ))
     fig.update_layout(
-        title=f"{team} — Points per Game by Player",
-        xaxis_title="Points per Game",
+        title=title,
+        xaxis_title=label,
+        xaxis_tickformat=tick_fmt,
         template="plotly_dark", height=500, margin=dict(l=160),
+    )
+    return fig
+
+
+def _scatter_subtitle(quality_filter: str, specific_opps: list, date_from: str | None) -> str:
+    parts = []
+    if specific_opps:
+        parts.append(f"vs. {', '.join(specific_opps)}")
+    elif quality_filter and quality_filter != "all":
+        parts.append({
+            "above500": "vs. teams above .500",
+            "below500": "vs. teams below .500",
+            "home": "Home games",
+            "away": "Away games",
+        }.get(quality_filter, quality_filter))
+    if date_from:
+        parts.append(f"since {date_from}")
+    return " · ".join(parts) if parts else "Filtered averages"
+
+
+def _scatter_chart(df: pd.DataFrame, x_col: str, y_col: str, subtitle: str = "") -> go.Figure:
+    x_label = STAT_LABELS.get(x_col, x_col)
+    y_label = STAT_LABELS.get(y_col, y_col)
+    x_fmt = ".0%" if x_col in PCT_STATS else ".1f"
+    y_fmt = ".0%" if y_col in PCT_STATS else ".1f"
+
+    fig = go.Figure()
+    for team, grp in df.groupby("Team"):
+        color = TEAM_COLORS.get(str(team), BLUE)
+        hovers = [
+            f"<b>{row['Player']}</b> · {team}<br>"
+            f"{x_label}: {_fmt(x_col, row[x_col])}<br>"
+            f"{y_label}: {_fmt(y_col, row[y_col])}<br>"
+            f"{int(row['GP']) if pd.notna(row.get('GP')) else '?'} GP"
+            for _, row in grp.iterrows()
+        ]
+        fig.add_trace(go.Scatter(
+            x=grp[x_col],
+            y=grp[y_col],
+            mode="markers+text",
+            name=team,
+            marker=dict(color=color, size=10, opacity=0.85,
+                        line=dict(width=1, color="rgba(255,255,255,0.3)")),
+            text=grp["Player"].apply(lambda n: n.split()[-1]),
+            textposition="top center",
+            textfont=dict(size=9, color=color),
+            hovertext=hovers,
+            hovertemplate="%{hovertext}<extra></extra>",
+        ))
+
+    title = f"{x_label} vs. {y_label}"
+    if subtitle:
+        title += f"<br><sup>{subtitle}</sup>"
+
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        xaxis_tickformat=x_fmt if x_col in PCT_STATS else "",
+        yaxis_tickformat=y_fmt if y_col in PCT_STATS else "",
+        template="plotly_dark",
+        height=580,
+        showlegend=True,
+        legend=dict(title="Team", orientation="v"),
     )
     return fig
 
