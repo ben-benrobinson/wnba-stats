@@ -42,10 +42,12 @@ def _load_per_game() -> pd.DataFrame:
 
 def register_callbacks(app) -> None:
 
-    from dashboard.layout import league_layout, player_layout, team_layout, scatter_layout, game_scatter_layout, durability_layout
+    from dashboard.layout import standings_layout, league_layout, player_layout, team_layout, scatter_layout, game_scatter_layout, durability_layout
 
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def render_page(pathname):
+        if pathname == "/league":
+            return league_layout()
         if pathname == "/player":
             return player_layout()
         if pathname == "/team":
@@ -56,7 +58,24 @@ def register_callbacks(app) -> None:
             return game_scatter_layout()
         if pathname == "/durability":
             return durability_layout()
-        return league_layout()
+        return standings_layout()
+
+    # ── Standings view ────────────────────────────────────────────────────────
+    @app.callback(
+        Output("standings-chart", "figure"),
+        Output("standings-table", "children"),
+        Input("url", "pathname"),
+    )
+    def update_standings(pathname):
+        if pathname not in ("/", None):
+            raise PreventUpdate
+        standings = load("team_standings")
+        if standings.empty:
+            empty = _empty_fig("No standings data yet — run the nightly refresh.")
+            return empty, ""
+        chart = _standings_chart(standings)
+        table = _standings_table(standings)
+        return chart, table
 
     # ── League view ───────────────────────────────────────────────────────────
     @app.callback(
@@ -936,6 +955,206 @@ def _durability_impact_chart(gamelogs: pd.DataFrame, roster: pd.DataFrame, team:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     return fig
+
+
+TOTAL_SEASON_GAMES = 40
+PLAYOFF_SPOTS = 8
+HCA_SPOTS = 4
+
+
+def _standings_prep(standings: pd.DataFrame):
+    """Return standings sorted best→worst with derived columns."""
+    from data.teams import TEAM_NAMES, TEAM_COLORS
+    df = standings.copy()
+    df["W"] = pd.to_numeric(df["W"], errors="coerce")
+    df["L"] = pd.to_numeric(df["L"], errors="coerce")
+    df = df.dropna(subset=["W", "L"]).reset_index(drop=True)
+
+    # Map full team name → abbreviation
+    name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
+    df["Abbrev"] = df["Team"].map(name_to_abbrev).fillna(df["Team"])
+    df["Color"] = df["Abbrev"].map(TEAM_COLORS).fillna(BLUE)
+
+    df["GP"] = df["W"] + df["L"]
+    df["Remaining"] = (TOTAL_SEASON_GAMES - df["GP"]).clip(lower=0)
+    df["W/L%"] = df["W"] / df["GP"]
+    df = df.sort_values("W/L%", ascending=False).reset_index(drop=True)
+
+    # Games behind leader
+    leader_W, leader_L = df.iloc[0]["W"], df.iloc[0]["L"]
+    df["GB"] = ((leader_W - df["W"]) + (df["L"] - leader_L)) / 2
+    df["GB"] = df["GB"].apply(lambda x: "—" if x == 0 else (f"{x:.1f}" if x % 1 else str(int(x))))
+
+    n = len(df)
+
+    def _wins_needed(rank, team_W, team_remaining, rival_W, rival_remaining):
+        rival_max = rival_W + rival_remaining
+        needed = max(0, int(rival_max - team_W + 1))
+        if needed > team_remaining:
+            return None  # mathematically impossible to clinch alone
+        return needed
+
+    # Wins to clinch playoffs
+    playoff_clinch = []
+    rival_po = df.iloc[PLAYOFF_SPOTS] if n > PLAYOFF_SPOTS else None  # first team out
+    last_in_po = df.iloc[PLAYOFF_SPOTS - 1] if n >= PLAYOFF_SPOTS else None
+    for i, row in df.iterrows():
+        rank = i + 1
+        if rival_po is None:
+            playoff_clinch.append(0)
+        elif rank <= PLAYOFF_SPOTS:
+            playoff_clinch.append(_wins_needed(
+                rank, row["W"], row["Remaining"],
+                rival_po["W"], rival_po["Remaining"],
+            ))
+        else:
+            # Out of playoffs: wins needed to guarantee passing the last team in
+            playoff_clinch.append(_wins_needed(
+                rank, row["W"], row["Remaining"],
+                last_in_po["W"], last_in_po["Remaining"],
+            ))
+    df["Clinch Playoffs"] = [
+        "Clinched" if v == 0 else ("—" if v is None else str(v))
+        for v in playoff_clinch
+    ]
+
+    # Wins to clinch home court advantage (top HCA_SPOTS)
+    hca_clinch = []
+    rival_hca = df.iloc[HCA_SPOTS] if n > HCA_SPOTS else None  # first team without HCA
+    last_in_hca = df.iloc[HCA_SPOTS - 1] if n >= HCA_SPOTS else None
+    for i, row in df.iterrows():
+        rank = i + 1
+        if rival_hca is None:
+            hca_clinch.append(0)
+        elif rank <= HCA_SPOTS:
+            hca_clinch.append(_wins_needed(
+                rank, row["W"], row["Remaining"],
+                rival_hca["W"], rival_hca["Remaining"],
+            ))
+        else:
+            hca_clinch.append(_wins_needed(
+                rank, row["W"], row["Remaining"],
+                last_in_hca["W"], last_in_hca["Remaining"],
+            ))
+    df["Clinch HCA"] = [
+        "Clinched" if v == 0 else ("—" if v is None else str(v))
+        for v in hca_clinch
+    ]
+
+    return df
+
+
+def _standings_chart(standings: pd.DataFrame) -> go.Figure:
+    df = _standings_prep(standings)
+    n = len(df)
+
+    # Plotly horizontal bars: sort ascending so best team renders at top
+    df_asc = df.iloc[::-1].reset_index(drop=True)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Wins",
+        y=df_asc["Team"],
+        x=df_asc["W"],
+        orientation="h",
+        marker_color=df_asc["Color"].tolist(),
+        hovertemplate="<b>%{y}</b><br>Wins: %{x}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Losses",
+        y=df_asc["Team"],
+        x=df_asc["L"],
+        orientation="h",
+        marker_color="rgba(180,60,60,0.6)",
+        hovertemplate="<b>%{y}</b><br>Losses: %{x}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Remaining",
+        y=df_asc["Team"],
+        x=df_asc["Remaining"],
+        orientation="h",
+        marker_color="rgba(255,255,255,0.08)",
+        hovertemplate="<b>%{y}</b><br>Games remaining: %{x}<extra></extra>",
+    ))
+
+    # Dotted line between playoff teams and non-playoff teams
+    # In ascending sort, playoff cutoff is between index (n-PLAYOFF_SPOTS-1) and (n-PLAYOFF_SPOTS)
+    po_y = n - PLAYOFF_SPOTS - 0.5
+    hca_y = n - HCA_SPOTS - 0.5
+
+    fig.add_shape(
+        type="line", x0=0, x1=1, xref="paper",
+        y0=po_y, y1=po_y,
+        line=dict(color=GOLD, width=2, dash="dot"),
+    )
+    fig.add_annotation(
+        x=1, xref="paper", y=po_y, yref="y",
+        text="Playoff cutoff", showarrow=False,
+        xanchor="right", yanchor="bottom",
+        font=dict(color=GOLD, size=11),
+    )
+    fig.add_shape(
+        type="line", x0=0, x1=1, xref="paper",
+        y0=hca_y, y1=hca_y,
+        line=dict(color="#6ec6e6", width=1.5, dash="dot"),
+    )
+    fig.add_annotation(
+        x=1, xref="paper", y=hca_y, yref="y",
+        text="Home court cutoff", showarrow=False,
+        xanchor="right", yanchor="bottom",
+        font=dict(color="#6ec6e6", size=11),
+    )
+
+    fig.update_layout(
+        barmode="stack",
+        title="2026 WNBA Standings",
+        xaxis_title="Games",
+        xaxis=dict(range=[0, TOTAL_SEASON_GAMES + 1]),
+        template="plotly_dark",
+        height=520,
+        margin=dict(l=200),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+
+def _standings_table(standings: pd.DataFrame):
+    df = _standings_prep(standings)
+
+    display = df[["Team", "W", "L", "W/L%", "GB", "Clinch Playoffs", "Clinch HCA"]].copy()
+    display.insert(0, "#", range(1, len(df) + 1))
+    display["W/L%"] = display["W/L%"].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "—")
+
+    playoff_cutoff_idx = PLAYOFF_SPOTS - 1  # 0-indexed last row IN playoffs
+
+    style_data_conditional = [
+        {"if": {"row_index": "odd"}, "backgroundColor": "#181b28"},
+        # Gold bottom border on playoff cutoff row
+        {
+            "if": {"row_index": playoff_cutoff_idx},
+            "borderBottom": f"2px dashed {GOLD}",
+        },
+        # Dim eliminated teams
+        *[
+            {"if": {"row_index": i}, "color": "#888"}
+            for i in range(PLAYOFF_SPOTS, len(df))
+        ],
+    ]
+
+    return dash_table.DataTable(
+        data=display.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in display.columns],
+        style_table={"overflowX": "auto"},
+        style_header={"backgroundColor": "#1e2130", "color": "white", "fontWeight": "bold"},
+        style_data={"backgroundColor": "#13161f", "color": "white"},
+        style_data_conditional=style_data_conditional,
+        style_cell={"textAlign": "left", "padding": "8px 12px"},
+        style_cell_conditional=[
+            {"if": {"column_id": c}, "textAlign": "center"}
+            for c in ["#", "W", "L", "W/L%", "GB", "Clinch Playoffs", "Clinch HCA"]
+        ],
+        page_size=20,
+    )
 
 
 def _summary_table(df: pd.DataFrame):

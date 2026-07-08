@@ -24,7 +24,8 @@ NAVBAR = dbc.NavbarSimple(
     dark=True,
     className="mb-4",
     children=[
-        dbc.NavItem(dbc.NavLink("League", href="/")),
+        dbc.NavItem(dbc.NavLink("Standings", href="/")),
+        dbc.NavItem(dbc.NavLink("Players", href="/league")),
         dbc.NavItem(dbc.NavLink("Player", href="/player")),
         dbc.NavItem(dbc.NavLink("Team", href="/team")),
         dbc.NavItem(dbc.NavLink("Scatter", href="/scatter")),
@@ -78,6 +79,16 @@ FOOTER = html.Footer(
         className="py-3",
     )
 )
+
+
+def standings_layout() -> html.Div:
+    return html.Div([
+        dbc.Container([
+            dbc.Row(dbc.Col(html.H2("League Standings"))),
+            dbc.Row(dbc.Col(dcc.Graph(id="standings-chart"))),
+            dbc.Row(dbc.Col(html.Div(id="standings-table"), className="mt-3")),
+        ]),
+    ])
 
 
 def league_layout() -> html.Div:
