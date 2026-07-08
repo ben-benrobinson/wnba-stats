@@ -1057,7 +1057,7 @@ def _standings_chart(standings: pd.DataFrame) -> go.Figure:
         y=df_asc["Team"],
         x=df_asc["W"],
         orientation="h",
-        marker_color=df_asc["Color"].tolist(),
+        marker_color="#2ecc71",
         hovertemplate="<b>%{y}</b><br>Wins: %{x}<extra></extra>",
     ))
     fig.add_trace(go.Bar(
@@ -1121,7 +1121,8 @@ def _standings_chart(standings: pd.DataFrame) -> go.Figure:
 def _standings_table(standings: pd.DataFrame):
     df = _standings_prep(standings)
 
-    display = df[["Team", "W", "L", "W/L%", "GB", "Clinch Playoffs", "Clinch HCA"]].copy()
+    df = df.rename(columns={"Clinch Playoffs": "Wins to Clinch Playoffs", "Clinch HCA": "Wins to Clinch HCA"})
+    display = df[["Team", "W", "L", "W/L%", "GB", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]].copy()
     display.insert(0, "#", range(1, len(df) + 1))
     display["W/L%"] = display["W/L%"].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "—")
 
@@ -1151,7 +1152,7 @@ def _standings_table(standings: pd.DataFrame):
         style_cell={"textAlign": "left", "padding": "8px 12px"},
         style_cell_conditional=[
             {"if": {"column_id": c}, "textAlign": "center"}
-            for c in ["#", "W", "L", "W/L%", "GB", "Clinch Playoffs", "Clinch HCA"]
+            for c in ["#", "W", "L", "W/L%", "GB", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]
         ],
         page_size=20,
     )
