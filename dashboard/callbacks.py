@@ -42,7 +42,7 @@ def _load_per_game() -> pd.DataFrame:
 
 def register_callbacks(app) -> None:
 
-    from dashboard.layout import league_layout, player_layout, team_layout, scatter_layout, game_scatter_layout
+    from dashboard.layout import league_layout, player_layout, team_layout, scatter_layout, game_scatter_layout, durability_layout
 
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def render_page(pathname):
@@ -54,6 +54,8 @@ def register_callbacks(app) -> None:
             return scatter_layout()
         if pathname == "/gamelog":
             return game_scatter_layout()
+        if pathname == "/durability":
+            return durability_layout()
         return league_layout()
 
     # ── League view ───────────────────────────────────────────────────────────
@@ -310,6 +312,47 @@ def register_callbacks(app) -> None:
         summary = html.Small("Game log data not yet available — showing season averages.",
                              className="text-muted")
         return _team_chart(roster, team, stat_col, "Season averages"), summary
+
+    # ── Durability view ───────────────────────────────────────────────────────
+    @app.callback(
+        Output("dur-availability-chart", "figure"),
+        Output("dur-impact-chart", "figure"),
+        Input("dur-team-select", "value"),
+    )
+    def update_durability(team):
+        if not team:
+            raise PreventUpdate
+
+        pg = _load_per_game()
+        gamelogs = load("player_gamelogs")
+
+        if pg.empty:
+            empty = _empty_fig("No data yet — run the nightly refresh.")
+            return empty, empty
+
+        roster = pg[(pg["Team"] == team) & (pg["Team"] != "TOT")].copy()
+        if roster.empty:
+            empty = _empty_fig(f"No players found for {team}.")
+            return empty, empty
+
+        # Total team games = max G on the roster (most played player sets the ceiling)
+        roster["G"] = pd.to_numeric(roster["G"], errors="coerce")
+        team_games = int(roster["G"].max()) if not roster["G"].isna().all() else 0
+        if team_games == 0:
+            empty = _empty_fig("Insufficient games data.")
+            return empty, empty
+
+        roster["avail_pct"] = roster["G"] / team_games
+        roster = roster.sort_values("avail_pct", ascending=True)
+
+        avail_fig = _durability_availability_chart(roster, team, team_games)
+
+        if gamelogs.empty or "Tm" not in gamelogs.columns:
+            impact_fig = _empty_fig("Game log data not yet available — run the nightly refresh.")
+            return avail_fig, impact_fig
+
+        impact_fig = _durability_impact_chart(gamelogs, roster, team, team_games)
+        return avail_fig, impact_fig
 
 
 # ── Chart builders ────────────────────────────────────────────────────────────
@@ -742,6 +785,155 @@ def _scatter_chart(df: pd.DataFrame, x_col: str, y_col: str, subtitle: str = "")
         height=580,
         showlegend=True,
         legend=dict(title="Team", orientation="v"),
+    )
+    return fig
+
+
+def _durability_availability_chart(roster: pd.DataFrame, team: str, team_games: int) -> go.Figure:
+    from data.teams import TEAM_COLORS, TEAM_NAMES
+    team_color = TEAM_COLORS.get(team, BLUE)
+
+    def _avail_color(pct: float) -> str:
+        if pct >= 0.90:
+            return "#2ecc71"
+        if pct >= 0.75:
+            return "#f5a623"
+        return "#e74c3c"
+
+    colors = [_avail_color(p) for p in roster["avail_pct"]]
+    hovers = [
+        f"<b>{row['Player']}</b><br>"
+        f"{int(row['G'])} of {team_games} games<br>"
+        f"Availability: {row['avail_pct']:.0%}"
+        for _, row in roster.iterrows()
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=roster["avail_pct"],
+        y=roster["Player"],
+        orientation="h",
+        marker_color=colors,
+        hovertext=hovers,
+        hovertemplate="%{hovertext}<extra></extra>",
+    ))
+    fig.add_vline(x=1.0, line_dash="dot", line_color="rgba(255,255,255,0.25)")
+    fig.update_layout(
+        title=f"{TEAM_NAMES.get(team, team)} — Player Availability ({team_games} team games)",
+        xaxis_title="Games played ÷ team games",
+        xaxis_tickformat=".0%",
+        xaxis_range=[0, 1.05],
+        template="plotly_dark",
+        height=max(300, len(roster) * 36 + 80),
+        margin=dict(l=160),
+    )
+    return fig
+
+
+def _durability_impact_chart(gamelogs: pd.DataFrame, roster: pd.DataFrame, team: str, team_games: int) -> go.Figure:
+    from data.teams import TEAM_COLORS, TEAM_NAMES
+
+    team_logs = gamelogs[gamelogs["Tm"] == team].copy()
+    if team_logs.empty or "Date" not in team_logs.columns or "Result" not in team_logs.columns:
+        return _empty_fig("No game log data for this team.")
+
+    # Full team schedule: unique (Date, Result) pairs
+    team_schedule = team_logs.drop_duplicates("Date")[["Date", "Result"]].set_index("Date")
+    total_w = int((team_schedule["Result"] == "W").sum())
+    total_l = int((team_schedule["Result"] == "L").sum())
+    total_g = total_w + total_l
+
+    if total_g == 0:
+        return _empty_fig("No complete game records found.")
+
+    records = []
+    for _, row in roster.iterrows():
+        player = row["Player"]
+        player_dates = set(team_logs[team_logs["Player"] == player]["Date"].dropna())
+        without_dates = set(team_schedule.index) - player_dates
+
+        if len(player_dates) == 0:
+            continue
+
+        with_results = team_schedule.loc[team_schedule.index.isin(player_dates), "Result"]
+        with_w = int((with_results == "W").sum())
+        with_g = len(with_results)
+        with_pct = with_w / with_g if with_g > 0 else None
+
+        without_results = team_schedule.loc[team_schedule.index.isin(without_dates), "Result"]
+        without_w = int((without_results == "W").sum())
+        without_g = len(without_results)
+        without_pct = without_w / without_g if without_g >= 2 else None
+
+        records.append({
+            "Player": player,
+            "with_pct": with_pct,
+            "with_g": with_g,
+            "with_w": with_w,
+            "without_pct": without_pct,
+            "without_g": without_g,
+            "without_w": without_w,
+            "avail_pct": row["avail_pct"],
+        })
+
+    if not records:
+        return _empty_fig("Not enough game log data to compute impact.")
+
+    df = pd.DataFrame(records).sort_values("avail_pct", ascending=False)
+    team_color = TEAM_COLORS.get(team, BLUE)
+
+    fig = go.Figure()
+    df = df.reset_index(drop=True)
+
+    fig.add_trace(go.Bar(
+        name="With player",
+        x=df["Player"],
+        y=df["with_pct"],
+        marker_color=team_color,
+        hovertext=[
+            f"<b>{r['Player']}</b> — With<br>"
+            f"{r['with_w']}-{r['with_g'] - r['with_w']} in {r['with_g']} games "
+            f"({r['with_pct']:.0%})"
+            if r["with_pct"] is not None else f"<b>{r['Player']}</b> — no data"
+            for _, r in df.iterrows()
+        ],
+        hovertemplate="%{hovertext}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        name="Without player",
+        x=df["Player"],
+        y=df["without_pct"],
+        marker_color=GRAY,
+        hovertext=[
+            f"<b>{r['Player']}</b> — Without<br>"
+            f"{r['without_w']}-{r['without_g'] - r['without_w']} in {r['without_g']} games "
+            f"({r['without_pct']:.0%})"
+            if r["without_pct"] is not None
+            else f"<b>{r['Player']}</b> — fewer than 2 games missed (no sample)"
+            for _, r in df.iterrows()
+        ],
+        hovertemplate="%{hovertext}<extra></extra>",
+    ))
+
+    # Overall team win% reference line
+    team_wpct = total_w / total_g
+    fig.add_hline(
+        y=team_wpct,
+        line_dash="dash",
+        line_color=GOLD,
+        annotation_text=f"Team overall {total_w}-{total_l} ({team_wpct:.0%})",
+        annotation_position="top left",
+        annotation_font_color=GOLD,
+    )
+
+    fig.update_layout(
+        title=f"{TEAM_NAMES.get(team, team)} — Team Win% With vs. Without Each Player",
+        yaxis_title="Win %",
+        yaxis_tickformat=".0%",
+        yaxis_range=[0, 1.05],
+        barmode="group",
+        template="plotly_dark",
+        height=420,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     return fig
 

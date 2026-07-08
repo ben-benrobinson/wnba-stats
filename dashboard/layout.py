@@ -29,6 +29,7 @@ NAVBAR = dbc.NavbarSimple(
         dbc.NavItem(dbc.NavLink("Team", href="/team")),
         dbc.NavItem(dbc.NavLink("Scatter", href="/scatter")),
         dbc.NavItem(dbc.NavLink("Game Log", href="/gamelog")),
+        dbc.NavItem(dbc.NavLink("Durability", href="/durability")),
     ],
 )
 
@@ -392,6 +393,52 @@ def scatter_layout() -> html.Div:
                 id="scatter-chart",
                 figure=_placeholder_fig("Select stats above to build the scatter plot", height=550),
             ))),
+        ]),
+    ])
+
+
+def durability_layout() -> html.Div:
+    pg = load("player_per_game")
+    team_options = []
+    if not pg.empty:
+        teams = sorted(t for t in pg["Team"].dropna().unique() if t not in ("TOT", "Team"))
+        team_options = [{"label": t, "value": t} for t in teams]
+
+    return html.Div([
+        dbc.Container([
+            dbc.Row(dbc.Col(html.H2("Durability — Availability & Impact"))),
+            dbc.Row(dbc.Col(
+                html.P(
+                    "How often does each player suit up — and how much does it matter when they don't?",
+                    className="text-muted",
+                ),
+            )),
+            dbc.Row([
+                dbc.Col(
+                    dcc.Dropdown(
+                        id="dur-team-select",
+                        placeholder="Select a team...",
+                        options=team_options,
+                        clearable=False,
+                    ),
+                    md=3,
+                ),
+            ], className="mb-4"),
+            dbc.Row(dbc.Col(dcc.Graph(
+                id="dur-availability-chart",
+                figure=_placeholder_fig("👆 Select a team to see availability", height=400),
+            ))),
+            dbc.Row(dbc.Col(dcc.Graph(
+                id="dur-impact-chart",
+                figure=_placeholder_fig("Win% with vs. without each player will appear here", height=400),
+            ), className="mt-4")),
+            dbc.Row(dbc.Col(
+                html.Small(
+                    "Availability = games played ÷ team games played. "
+                    "Win% without requires at least 2 games missed to display.",
+                    className="text-muted mt-2",
+                )
+            )),
         ]),
     ])
 
