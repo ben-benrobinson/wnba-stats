@@ -331,6 +331,20 @@ def register_callbacks(app) -> None:
                         .rename(columns={"Date": "GP"})
                     avg = avg.merge(gp, on="Player")
                 avg["Team"] = team
+
+                # Fill in any roster players missing from gamelogs using per_game season averages
+                if not pg.empty:
+                    missing = pg[
+                        (pg["Team"] == team) &
+                        (~pg["Player"].isin(avg["Player"])) &
+                        (pg["G"] >= 3)
+                    ].copy()
+                    if not missing.empty:
+                        missing_avg = missing[["Player"] + [c for c in avg_cols if c in missing.columns]].copy()
+                        missing_avg["GP"] = pd.to_numeric(missing["G"], errors="coerce")
+                        missing_avg["Team"] = team
+                        avg = pd.concat([avg, missing_avg], ignore_index=True)
+
                 if stat_col in avg.columns:
                     avg = avg.sort_values(stat_col, ascending=True)
                     return _team_chart(avg, team, stat_col, filter_label), summary
