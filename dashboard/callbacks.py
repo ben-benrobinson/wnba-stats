@@ -73,9 +73,24 @@ def register_callbacks(app) -> None:
         if standings.empty:
             empty = _empty_fig("No standings data yet — run the nightly refresh.")
             return empty, ""
+        gamelogs = load("player_gamelogs")
+        last10 = _compute_last10(gamelogs)
         chart = _standings_chart(standings)
-        table = _standings_table(standings)
+        table = _standings_table(standings, last10)
         return chart, table
+
+    @app.callback(
+        Output("standings-winpct-chart", "figure"),
+        Input("url", "pathname"),
+        Input("standings-team-filter", "value"),
+    )
+    def update_winpct_chart(pathname, selected_teams):
+        if pathname not in ("/", None):
+            raise PreventUpdate
+        gamelogs = load("player_gamelogs")
+        if gamelogs.empty:
+            return _empty_fig("No game log data yet — run the nightly refresh.")
+        return _winpct_trend_chart(gamelogs, selected_teams or [])
 
     # ── League view ───────────────────────────────────────────────────────────
     @app.callback(
@@ -957,6 +972,87 @@ def _durability_impact_chart(gamelogs: pd.DataFrame, roster: pd.DataFrame, team:
     return fig
 
 
+def _team_schedule(gamelogs: pd.DataFrame) -> pd.DataFrame:
+    """Unique (Tm, Date, Result) rows — one row per team per game."""
+    if gamelogs.empty or "Tm" not in gamelogs.columns:
+        return pd.DataFrame()
+    cols = [c for c in ["Tm", "Date", "Result"] if c in gamelogs.columns]
+    return gamelogs[cols].drop_duplicates(["Tm", "Date"]).copy()
+
+
+def _compute_last10(gamelogs: pd.DataFrame) -> dict[str, str]:
+    """Returns {team_abbrev: 'W-L'} for each team's last 10 games."""
+    sched = _team_schedule(gamelogs)
+    if sched.empty:
+        return {}
+    sched["Date"] = pd.to_datetime(sched["Date"], errors="coerce")
+    result = {}
+    for tm, grp in sched.groupby("Tm"):
+        last10 = grp.sort_values("Date").tail(10)
+        w = int((last10["Result"] == "W").sum())
+        l = int((last10["Result"] == "L").sum())
+        result[tm] = f"{w}-{l}"
+    return result
+
+
+def _winpct_trend_chart(gamelogs: pd.DataFrame, selected_teams: list) -> go.Figure:
+    from data.teams import TEAM_COLORS, TEAM_NAMES
+    sched = _team_schedule(gamelogs)
+    if sched.empty:
+        return _empty_fig("No game log data available.")
+    sched["Date"] = pd.to_datetime(sched["Date"], errors="coerce")
+    sched = sched.dropna(subset=["Date"]).sort_values(["Tm", "Date"])
+
+    all_teams = sorted(sched["Tm"].unique())
+    highlight = set(selected_teams) if selected_teams else set()
+
+    fig = go.Figure()
+    for tm in all_teams:
+        grp = sched[sched["Tm"] == tm].reset_index(drop=True)
+        grp["cum_w"] = (grp["Result"] == "W").cumsum()
+        grp["game_num"] = range(1, len(grp) + 1)
+        grp["wpct"] = grp["cum_w"] / grp["game_num"]
+
+        is_highlighted = not highlight or tm in highlight
+        color = TEAM_COLORS.get(tm, BLUE)
+        name = TEAM_NAMES.get(tm, tm)
+
+        hovers = [
+            f"<b>{name}</b><br>Game {row['game_num']}: {int(row['cum_w'])}-{row['game_num'] - int(row['cum_w'])}<br>Win%: {row['wpct']:.1%}"
+            for _, row in grp.iterrows()
+        ]
+
+        fig.add_trace(go.Scatter(
+            x=grp["game_num"],
+            y=grp["wpct"],
+            mode="lines",
+            name=name,
+            line=dict(
+                color=color if is_highlighted else "rgba(255,255,255,0.12)",
+                width=2.5 if is_highlighted else 1,
+            ),
+            opacity=1.0 if is_highlighted else 0.4,
+            hovertext=hovers,
+            hovertemplate="%{hovertext}<extra></extra>",
+        ))
+
+    fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(255,255,255,0.25)",
+                  annotation_text=".500", annotation_position="right",
+                  annotation_font_color="rgba(255,255,255,0.4)")
+
+    fig.update_layout(
+        xaxis_title="Game",
+        yaxis_title="Win %",
+        yaxis_tickformat=".0%",
+        yaxis_range=[0, 1],
+        template="plotly_dark",
+        height=420,
+        legend=dict(orientation="v", font=dict(size=11)),
+        margin=dict(r=120),
+    )
+    return fig
+
+
 TOTAL_SEASON_GAMES = 40
 PLAYOFF_SPOTS = 8
 HCA_SPOTS = 4
@@ -1118,11 +1214,12 @@ def _standings_chart(standings: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def _standings_table(standings: pd.DataFrame):
+def _standings_table(standings: pd.DataFrame, last10: dict | None = None):
     df = _standings_prep(standings)
 
+    df["Last 10"] = df["Abbrev"].map(last10 or {}).fillna("—")
     df = df.rename(columns={"Clinch Playoffs": "Wins to Clinch Playoffs", "Clinch HCA": "Wins to Clinch HCA"})
-    display = df[["Team", "W", "L", "W/L%", "GB", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]].copy()
+    display = df[["Team", "W", "L", "W/L%", "GB", "Last 10", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]].copy()
     display.insert(0, "#", range(1, len(df) + 1))
     display["W/L%"] = display["W/L%"].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "—")
 
@@ -1152,7 +1249,7 @@ def _standings_table(standings: pd.DataFrame):
         style_cell={"textAlign": "left", "padding": "8px 12px"},
         style_cell_conditional=[
             {"if": {"column_id": c}, "textAlign": "center"}
-            for c in ["#", "W", "L", "W/L%", "GB", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]
+            for c in ["#", "W", "L", "W/L%", "GB", "Last 10", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]
         ],
         page_size=20,
     )

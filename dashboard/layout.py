@@ -82,11 +82,33 @@ FOOTER = html.Footer(
 
 
 def standings_layout() -> html.Div:
+    from data.store import load as _load
+    st = _load("player_per_game")
+    team_options = []
+    if not st.empty and "Team" in st.columns:
+        teams = sorted(t for t in st["Team"].dropna().unique() if t not in ("TOT", "Team"))
+        team_options = [{"label": t, "value": t} for t in teams]
+
     return html.Div([
         dbc.Container([
             dbc.Row(dbc.Col(html.H2("League Standings"))),
             dbc.Row(dbc.Col(dcc.Graph(id="standings-chart"))),
             dbc.Row(dbc.Col(html.Div(id="standings-table"), className="mt-3")),
+            html.Hr(className="mt-5"),
+            dbc.Row([
+                dbc.Col(html.H4("Win % Over the Season"), md=8),
+                dbc.Col(
+                    dcc.Dropdown(
+                        id="standings-team-filter",
+                        options=team_options,
+                        placeholder="All teams (select to highlight)",
+                        multi=True,
+                        clearable=True,
+                    ),
+                    md=4,
+                ),
+            ], className="align-items-center mb-2"),
+            dbc.Row(dbc.Col(dcc.Graph(id="standings-winpct-chart"))),
         ]),
     ])
 
