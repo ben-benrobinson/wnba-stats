@@ -69,15 +69,15 @@ GLOSSARY = dbc.Container([
 ], className="mt-4")
 
 FOOTER = html.Footer(
-    dbc.Container(
+    dbc.Container([
         html.Small(
             "Data: basketball-reference.com · Refreshed nightly · "
             "Stats computed by basketball-reference from box scores. "
             "Bayesian TS% computed in-house.",
             className="text-muted",
         ),
-        className="py-3",
-    )
+        html.Div(id="data-quality-badge", className="mt-1"),
+    ], className="py-3"),
 )
 
 

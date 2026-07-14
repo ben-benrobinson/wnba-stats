@@ -18,6 +18,10 @@ MIN_GAMES_FOR_GAMELOG = 5
 # (Some rows are legitimately missing — DNPs, bref data gaps — so we allow slack.)
 GAMELOG_COVERAGE_THRESHOLD = 0.75
 
+# Fatal thresholds — if exceeded, the nightly restores from backup.
+FATAL_MISSING_PLAYER_PCT = 0.10   # >10% of active players absent from gamelogs
+FATAL_STANDINGS_DIVERGE_TEAMS = 3  # >3 teams with W gap > 5 vs gamelogs
+
 
 def check_gamelog_coverage(pg: pd.DataFrame, gl: pd.DataFrame) -> list[str]:
     """
@@ -297,6 +301,52 @@ def check_per_game_times_g_vs_totals(pg: pd.DataFrame, totals: pd.DataFrame) -> 
                 f"totals={row['total']:.0f} ({row['pct_diff']:.0%} divergence)"
             )
     return issues
+
+
+def missing_gamelog_players(pg: pd.DataFrame, gl: pd.DataFrame) -> list[str]:
+    """Return names of players with MIN_GAMES_FOR_GAMELOG+ games but no gamelog rows."""
+    if pg.empty:
+        return []
+    active = pg[pd.to_numeric(pg["G"], errors="coerce") >= MIN_GAMES_FOR_GAMELOG]["Player"].dropna()
+    gl_players = set(gl["Player"].dropna().unique()) if not gl.empty else set()
+    return [p for p in active if p not in gl_players]
+
+
+def is_fatal(pg: pd.DataFrame, gl: pd.DataFrame, standings: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Returns (fatal, reason). Fatal means the nightly should restore from backup
+    rather than serve the new (broken) data.
+    """
+    # Empty gamelogs is always fatal
+    if gl.empty:
+        return True, "player_gamelogs table is empty after fetch"
+
+    # Too many players missing
+    active_count = int((pd.to_numeric(pg.get("G", pd.Series()), errors="coerce") >= MIN_GAMES_FOR_GAMELOG).sum())
+    missing_count = len(missing_gamelog_players(pg, gl))
+    if active_count > 0 and missing_count / active_count > FATAL_MISSING_PLAYER_PCT:
+        return True, (
+            f"{missing_count} of {active_count} active players missing from gamelogs "
+            f"({missing_count/active_count:.0%} > {FATAL_MISSING_PLAYER_PCT:.0%} threshold)"
+        )
+
+    # Too many teams with large W divergence
+    if not standings.empty and "Tm" in gl.columns and "Result" in gl.columns:
+        from data.teams import TEAM_NAMES
+        name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
+        game_results = gl.drop_duplicates(["Tm", "Date"])[["Tm", "Result"]]
+        gl_wins = game_results[game_results["Result"] == "W"].groupby("Tm").size()
+        bad_teams = 0
+        for _, row in standings.iterrows():
+            abbrev = name_to_abbrev.get(str(row.get("Team", "")), "")
+            st_w = pd.to_numeric(row.get("W"), errors="coerce")
+            gl_w = gl_wins.get(abbrev, 0)
+            if pd.notna(st_w) and abs(gl_w - st_w) > 5:
+                bad_teams += 1
+        if bad_teams >= FATAL_STANDINGS_DIVERGE_TEAMS:
+            return True, f"{bad_teams} teams have W divergence >5 between standings and gamelogs"
+
+    return False, ""
 
 
 def run_all() -> list[str]:

@@ -60,6 +60,47 @@ def register_callbacks(app) -> None:
             return durability_layout()
         return standings_layout()
 
+    # ── Data quality badge ────────────────────────────────────────────────────
+    @app.callback(
+        Output("data-quality-badge", "children"),
+        Input("url", "pathname"),
+    )
+    def update_data_quality_badge(_pathname):
+        from data.store import load_data_quality
+        rec = load_data_quality()
+        if rec is None:
+            return ""
+        ts = rec.get("run_timestamp", "")
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(ts).astimezone(timezone.utc)
+            ts_fmt = dt.strftime("%-I:%M %p UTC, %b %-d")
+        except Exception:
+            ts_fmt = ts[:16]
+
+        fatal = bool(rec.get("fatal"))
+        issue_count = int(rec.get("issue_count", 0))
+        action = rec.get("action_taken", "")
+
+        if fatal:
+            color, icon, msg = "danger", "⚠", f"Backup restored — serving previous data · Last attempted {ts_fmt}"
+        elif issue_count:
+            issues = rec.get("issues", [])
+            tooltip = " · ".join(issues[:3]) + (" · …" if len(issues) > 3 else "")
+            color, icon, msg = "warning", "⚠", f"{issue_count} data warning(s) · Last updated {ts_fmt}"
+            return html.Small([
+                dbc.Badge(f"{icon} {issue_count} data warning(s)", color=color, className="me-2"),
+                html.Span(f"Last updated {ts_fmt}", className="text-muted"),
+                html.Br(),
+                html.Span(tooltip, className="text-muted", style={"fontSize": "0.8em"}),
+            ])
+        else:
+            color, icon, msg = "success", "✓", f"All checks passed · Last updated {ts_fmt}"
+
+        return html.Small([
+            dbc.Badge(f"{icon} {msg}", color=color, className="me-2"),
+        ])
+
     # ── Standings view ────────────────────────────────────────────────────────
     @app.callback(
         Output("standings-chart", "figure"),
