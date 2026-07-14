@@ -406,6 +406,18 @@ def scatter_layout() -> html.Div:
                         clearable=True,
                     ),
                 ], md=3),
+                dbc.Col([
+                    html.Label("Filter to team", className="small text-muted"),
+                    dcc.Dropdown(
+                        id="scatter-team-filter",
+                        placeholder="All teams",
+                        options=[{"label": t, "value": t} for t in
+                                 sorted({t for t in pg["Team"].dropna().unique()
+                                         if t not in ("TOT", "Team")})] if not pg.empty else [],
+                        multi=True,
+                        clearable=True,
+                    ),
+                ], md=2),
             ], className="mb-2"),
             dbc.Row([
                 dbc.Col([

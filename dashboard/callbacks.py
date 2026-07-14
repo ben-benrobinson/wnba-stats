@@ -218,8 +218,9 @@ def register_callbacks(app) -> None:
         Input("scatter-opp-select", "value"),
         Input("scatter-date-from", "date"),
         Input("scatter-min-gp", "value"),
+        Input("scatter-team-filter", "value"),
     )
-    def update_scatter(x_col, y_col, quality_filter, specific_opps, date_from, min_gp):
+    def update_scatter(x_col, y_col, quality_filter, specific_opps, date_from, min_gp, team_filter):
         if not x_col or not y_col:
             raise PreventUpdate
 
@@ -285,6 +286,11 @@ def register_callbacks(app) -> None:
 
         if x_col not in agg.columns or y_col not in agg.columns:
             return _empty_fig(f"Missing column(s): {x_col}, {y_col}")
+
+        if team_filter:
+            agg = agg[agg["Team"].isin(team_filter)]
+            if agg.empty:
+                return _empty_fig(f"No data for selected team(s).")
 
         return _scatter_chart(agg, x_col, y_col, subtitle)
 
