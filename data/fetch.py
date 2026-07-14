@@ -193,9 +193,13 @@ def fetch_player_gamelog(player_id: str, player_name: str) -> pd.DataFrame:
     return df
 
 
-def fetch_all_gamelogs(player_ids: dict[str, str]) -> pd.DataFrame:
-    """Fetches game logs for all players. Skips players that error."""
+def fetch_all_gamelogs(player_ids: dict[str, str]) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Fetches game logs for all players. Skips players that error.
+    Returns (gamelogs_df, skipped_player_names).
+    """
     frames = []
+    skipped = []
     total = len(player_ids)
     for i, (name, pid) in enumerate(player_ids.items(), 1):
         log.info("  gamelog [%d/%d] %s", i, total, name)
@@ -203,9 +207,14 @@ def fetch_all_gamelogs(player_ids: dict[str, str]) -> pd.DataFrame:
             df = fetch_player_gamelog(pid, name)
             if not df.empty:
                 frames.append(df)
+            else:
+                log.warning("  Empty gamelog returned for %s (%s)", name, pid)
+                skipped.append(name)
         except Exception as e:
             log.warning("  Skipping %s (%s): %s", name, pid, e)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            skipped.append(name)
+    result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return result, skipped
 
 
 def fetch_team_standings() -> pd.DataFrame:

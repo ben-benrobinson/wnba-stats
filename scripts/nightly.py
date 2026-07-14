@@ -65,12 +65,19 @@ def run():
 
     log.info("Fetching game logs (~%d requests, ~%d min)...",
              len(player_ids), len(player_ids) * 2 // 60)
-    gamelogs = fetch_all_gamelogs(player_ids)
+    gamelogs, skipped = fetch_all_gamelogs(player_ids)
     if not gamelogs.empty:
         save(gamelogs, "player_gamelogs")
         log.info("  %d game rows across %d players", len(gamelogs), gamelogs["Player"].nunique())
     else:
         log.warning("  No game log data returned")
+    if skipped:
+        log.warning("  %d player(s) skipped during gamelog fetch: %s",
+                    len(skipped), ", ".join(sorted(skipped)))
+
+    log.info("Running post-refresh validation checks...")
+    from scripts.validate import run_all
+    run_all()
 
     log.info("=== Refresh complete ===")
 
