@@ -25,6 +25,7 @@ NAVBAR = dbc.NavbarSimple(
     className="mb-4",
     children=[
         dbc.NavItem(dbc.NavLink("Standings", href="/")),
+        dbc.NavItem(dbc.NavLink("Playoffs", href="/playoffs")),
         dbc.NavItem(dbc.NavLink("Leaders", href="/league")),
         dbc.NavItem(dbc.NavLink("Player Profile", href="/player")),
         dbc.NavItem(dbc.NavLink("Roster", href="/team")),
@@ -92,6 +93,7 @@ def standings_layout() -> html.Div:
     return html.Div([
         dbc.Container([
             dbc.Row(dbc.Col(html.H2("League Standings"))),
+            dbc.Row(dbc.Col(html.Div(id="standings-banner"))),
             dbc.Row(dbc.Col(dcc.Graph(id="standings-chart"))),
             dbc.Row(dbc.Col(html.Div(id="standings-table"), className="mt-3")),
             html.Hr(className="mt-5"),
@@ -109,6 +111,47 @@ def standings_layout() -> html.Div:
                 ),
             ], className="align-items-center mb-2"),
             dbc.Row(dbc.Col(dcc.Graph(id="standings-winpct-chart"))),
+        ]),
+    ])
+
+
+_PLAYOFF_STAT_OPTIONS = [
+    {"label": "Points", "value": "PTS"},
+    {"label": "Rebounds", "value": "TRB"},
+    {"label": "Assists", "value": "AST"},
+    {"label": "Steals", "value": "STL"},
+    {"label": "Blocks", "value": "BLK"},
+    {"label": "Minutes", "value": "MP"},
+    {"label": "True Shooting %", "value": "TS%"},
+    {"label": "Game Score", "value": "GmSc"},
+]
+
+
+def playoffs_layout() -> html.Div:
+    return html.Div([
+        dbc.Container([
+            dbc.Row(dbc.Col(html.H2("2026 Playoffs"))),
+            dbc.Row(dbc.Col(html.Div(id="playoffs-summary", className="text-muted mb-3"))),
+            html.Div(id="playoffs-bracket"),
+            html.Hr(className="mt-5"),
+            dbc.Row([
+                dbc.Col(html.H4("Playoff Leaders (per game)"), md=6),
+                dbc.Col([
+                    dbc.Label("Stat"),
+                    dcc.Dropdown(id="playoffs-stat", options=_PLAYOFF_STAT_OPTIONS,
+                                 value="PTS", clearable=False),
+                ], md=3),
+                dbc.Col(
+                    dbc.Checklist(
+                        id="playoffs-alive-only",
+                        options=[{"label": " Teams still alive only", "value": "alive"}],
+                        value=[], switch=True,
+                    ),
+                    md=3, className="pt-4",
+                ),
+            ], className="align-items-center mb-2"),
+            dbc.Row(dbc.Col(dcc.Graph(id="playoffs-leaders-chart"))),
+            dbc.Row(dbc.Col(html.Div(id="playoffs-leaders-table"), className="mt-3")),
         ]),
     ])
 

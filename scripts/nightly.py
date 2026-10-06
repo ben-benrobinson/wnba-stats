@@ -33,6 +33,7 @@ def run():
         fetch_all_gamelogs,
         fetch_player_gamelog,
         fetch_team_standings,
+        fetch_playoff_series,
     )
     from data.store import (
         save, load,
@@ -80,7 +81,7 @@ def run():
 
     log.info("Fetching game logs (~%d requests, ~%d min)...",
              len(player_ids), len(player_ids) * 4 // 60)
-    gamelogs, skipped = fetch_all_gamelogs(player_ids)
+    gamelogs, playoff_gamelogs, skipped = fetch_all_gamelogs(player_ids)
     if not gamelogs.empty:
         save(gamelogs, "player_gamelogs")
         log.info("  %d game rows across %d players", len(gamelogs), gamelogs["Player"].nunique())
@@ -88,6 +89,22 @@ def run():
         log.warning("  No game log data returned")
     if skipped:
         log.warning("  %d player(s) skipped: %s", len(skipped), ", ".join(sorted(skipped)))
+    if not playoff_gamelogs.empty:
+        save(playoff_gamelogs, "player_playoff_gamelogs")
+        log.info("  %d playoff game rows across %d players",
+                 len(playoff_gamelogs), playoff_gamelogs["Player"].nunique())
+
+    log.info("Fetching playoff bracket...")
+    try:
+        series, playoff_games = fetch_playoff_series()
+        if not series.empty:
+            save(series, "playoff_series")
+            save(playoff_games, "playoff_games")
+            log.info("  %d series, %d games", len(series), len(playoff_games))
+        else:
+            log.info("  No playoff bracket yet")
+    except Exception as e:
+        log.warning("  Playoff bracket fetch failed: %s", e)
 
     # ── 3. Targeted retry for players missing from gamelogs ───────────────────
     players_retried = []

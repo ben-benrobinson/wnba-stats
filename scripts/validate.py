@@ -79,10 +79,9 @@ def check_standings_teams(standings: pd.DataFrame, gl: pd.DataFrame) -> list[str
     if standings.empty or gl.empty or "Tm" not in gl.columns:
         return issues
 
-    from data.teams import TEAM_NAMES
-    name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
+    from data.teams import team_abbrev
     standing_abbrevs = {
-        name_to_abbrev.get(str(row.get("Team", "")), str(row.get("Team", "")))
+        team_abbrev(row.get("Team", ""), str(row.get("Team", "")))
         for _, row in standings.iterrows()
     }
     gl_teams = set(gl["Tm"].dropna().unique())
@@ -92,16 +91,17 @@ def check_standings_teams(standings: pd.DataFrame, gl: pd.DataFrame) -> list[str
     return issues
 
 
-def check_table_freshness(gl: pd.DataFrame) -> list[str]:
+def check_table_freshness(gl: pd.DataFrame, playoff_gl: pd.DataFrame | None = None) -> list[str]:
     """
-    The most recent game date in player_gamelogs should be within the last 5 days
-    (accounts for off-days / All-Star breaks). Stale data is flagged.
+    The most recent game date (regular season or playoffs) should be within the
+    last 5 days (accounts for off-days / All-Star breaks). Stale data is flagged.
     """
     issues = []
     if gl.empty or "Date" not in gl.columns:
         return issues
 
-    dates = pd.to_datetime(gl["Date"], errors="coerce").dropna()
+    frames = [gl] + ([playoff_gl] if playoff_gl is not None and "Date" in playoff_gl.columns else [])
+    dates = pd.to_datetime(pd.concat([f["Date"] for f in frames]), errors="coerce").dropna()
     if dates.empty:
         return issues
 
@@ -113,6 +113,16 @@ def check_table_freshness(gl: pd.DataFrame) -> list[str]:
             f"({days_old} days ago) — data may be stale"
         )
     return issues
+
+
+def _season_rows(pg: pd.DataFrame) -> pd.DataFrame:
+    """One row per player: the TOT row for traded players, else their only team row."""
+    if "Team" not in pg.columns:
+        return pg.drop_duplicates("Player")
+    return (pg.assign(_tot=(pg["Team"] == "TOT"))
+              .sort_values("_tot", ascending=False)
+              .drop_duplicates("Player")
+              .drop(columns="_tot"))
 
 
 def check_gamelog_stats_vs_per_game(pg: pd.DataFrame, gl: pd.DataFrame) -> list[str]:
@@ -131,6 +141,7 @@ def check_gamelog_stats_vs_per_game(pg: pd.DataFrame, gl: pd.DataFrame) -> list[
     pg_num = pg.copy()
     pg_num["G"] = pd.to_numeric(pg_num["G"], errors="coerce")
     pg_num = pg_num[pg_num["G"] >= MIN_GAMES_FOR_GAMELOG].dropna(subset=["Player"])
+    pg_num = _season_rows(pg_num)
 
     for col in CHECK_COLS:
         if col not in pg_num.columns or col not in gl.columns:
@@ -163,8 +174,7 @@ def check_standings_vs_gamelogs(standings: pd.DataFrame, gl: pd.DataFrame) -> li
     if standings.empty or gl.empty or "Tm" not in gl.columns or "Result" not in gl.columns:
         return issues
 
-    from data.teams import TEAM_NAMES
-    name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
+    from data.teams import team_abbrev
 
     # One row per (team, game date) to avoid double-counting from multiple players
     game_results = gl.drop_duplicates(["Tm", "Date"])[["Tm", "Result"]]
@@ -172,7 +182,7 @@ def check_standings_vs_gamelogs(standings: pd.DataFrame, gl: pd.DataFrame) -> li
     gl_losses = game_results[game_results["Result"] == "L"].groupby("Tm").size()
 
     for _, row in standings.iterrows():
-        abbrev = name_to_abbrev.get(str(row.get("Team", "")), "")
+        abbrev = team_abbrev(row.get("Team", ""))
         if not abbrev:
             continue
         st_w = pd.to_numeric(row.get("W"), errors="coerce")
@@ -286,9 +296,11 @@ def check_per_game_times_g_vs_totals(pg: pd.DataFrame, totals: pd.DataFrame) -> 
         pg_num[col] = pd.to_numeric(pg_num[col], errors="coerce")
         tot_num[col] = pd.to_numeric(tot_num[col], errors="coerce")
 
-        merged = pg_num[["Player", "G", col]].merge(
-            tot_num[["Player", col]].rename(columns={col: "total"}),
-            on="Player", how="inner",
+        # Traded players have a TOT row plus one row per team — match like for like
+        keys = ["Player", "Team"] if "Team" in pg_num.columns and "Team" in tot_num.columns else ["Player"]
+        merged = pg_num[keys + ["G", col]].merge(
+            tot_num[keys + [col]].rename(columns={col: "total"}),
+            on=keys, how="inner",
         ).dropna()
         merged["implied_total"] = merged[col] * merged["G"]
         merged["diff"] = (merged["implied_total"] - merged["total"]).abs()
@@ -332,13 +344,16 @@ def is_fatal(pg: pd.DataFrame, gl: pd.DataFrame, standings: pd.DataFrame) -> tup
 
     # Too many teams with large W divergence
     if not standings.empty and "Tm" in gl.columns and "Result" in gl.columns:
-        from data.teams import TEAM_NAMES
-        name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
+        from data.teams import team_abbrev
         game_results = gl.drop_duplicates(["Tm", "Date"])[["Tm", "Result"]]
         gl_wins = game_results[game_results["Result"] == "W"].groupby("Tm").size()
         bad_teams = 0
         for _, row in standings.iterrows():
-            abbrev = name_to_abbrev.get(str(row.get("Team", "")), "")
+            abbrev = team_abbrev(row.get("Team", ""))
+            if not abbrev:
+                # Unmapped name is a lookup problem, not bad data — don't restore over it
+                log.warning("is_fatal: unrecognized standings team %r", row.get("Team"))
+                continue
             st_w = pd.to_numeric(row.get("W"), errors="coerce")
             gl_w = gl_wins.get(abbrev, 0)
             if pd.notna(st_w) and abs(gl_w - st_w) > 5:
@@ -357,6 +372,7 @@ def run_all() -> list[str]:
     gl      = load("player_gamelogs")
     standings = load("team_standings")
     totals  = load("player_totals")
+    playoff_gl = load("player_playoff_gamelogs")
 
     all_issues = []
     checks = [
@@ -364,7 +380,7 @@ def run_all() -> list[str]:
         ("gamelog_coverage",         check_gamelog_coverage(pg, gl)),
         ("gamelog_row_counts",       check_gamelog_row_counts(pg, gl)),
         ("standings_teams",          check_standings_teams(standings, gl)),
-        ("table_freshness",          check_table_freshness(gl)),
+        ("table_freshness",          check_table_freshness(gl, playoff_gl)),
         # Internal consistency checks
         ("gamelog_stats_vs_per_game",  check_gamelog_stats_vs_per_game(pg, gl)),
         ("standings_vs_gamelogs",      check_standings_vs_gamelogs(standings, gl)),

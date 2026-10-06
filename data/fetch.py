@@ -9,6 +9,8 @@ import requests
 import pandas as pd
 from io import StringIO
 
+from data.teams import clean_team_name
+
 BASE_URL = "https://www.basketball-reference.com/wnba"
 CURRENT_SEASON = "2026"
 
@@ -119,10 +121,18 @@ def fetch_player_ids() -> dict[str, str]:
 
 def fetch_player_gamelog(player_id: str, player_name: str) -> pd.DataFrame:
     """
-    Game-by-game log for a single player this season.
+    Regular-season game-by-game log for a single player this season.
     Returns a cleaned DataFrame with one row per game played.
     """
-    from bs4 import BeautifulSoup
+    regular, _ = fetch_player_gamelogs_both(player_id, player_name)
+    return regular
+
+
+def fetch_player_gamelogs_both(player_id: str, player_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Regular-season and playoff game logs for a single player, from one page fetch.
+    bref puts playoffs in a second table (wnba_pgl_basic_p) on the same page.
+    """
     first = player_id[0]
     url = f"{BASE_URL}/players/{first}/{player_id}/gamelog/{CURRENT_SEASON}/"
     # Polite delay + retry on 429
@@ -140,11 +150,30 @@ def fetch_player_gamelog(player_id: str, player_name: str) -> pd.DataFrame:
             if attempt == 2:
                 raise
     else:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-    soup = BeautifulSoup(resp.content.decode("utf-8", errors="replace"), "html5lib")
+    html = resp.content.decode("utf-8", errors="replace")
+    regular = _parse_gamelog_table(_find_table(html, "wnba_pgl_basic"), player_id, player_name)
+    playoffs = _parse_gamelog_table(_find_table(html, "wnba_pgl_basic_p"), player_id, player_name)
+    return regular, playoffs
 
-    table = soup.find("table", id="wnba_pgl_basic")
+
+def _find_table(html: str, table_id: str):
+    """Find a table by id, including ones bref hides inside HTML comments."""
+    from bs4 import BeautifulSoup, Comment
+    soup = BeautifulSoup(html, "html5lib")
+    table = soup.find("table", id=table_id)
+    if table is not None:
+        return table
+    marker = f'id="{table_id}"'
+    for c in soup.find_all(string=lambda t: isinstance(t, Comment) and marker in t):
+        table = BeautifulSoup(c, "html5lib").find("table", id=table_id)
+        if table is not None:
+            return table
+    return None
+
+
+def _parse_gamelog_table(table, player_id: str, player_name: str) -> pd.DataFrame:
     if table is None:
         return pd.DataFrame()
 
@@ -193,18 +222,20 @@ def fetch_player_gamelog(player_id: str, player_name: str) -> pd.DataFrame:
     return df
 
 
-def fetch_all_gamelogs(player_ids: dict[str, str]) -> tuple[pd.DataFrame, list[str]]:
+def fetch_all_gamelogs(player_ids: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """
-    Fetches game logs for all players. Skips players that error.
-    Returns (gamelogs_df, skipped_player_names).
+    Fetches regular-season and playoff game logs for all players. Skips players that error.
+    Returns (gamelogs_df, playoff_gamelogs_df, skipped_player_names).
     """
-    frames = []
+    frames, playoff_frames = [], []
     skipped = []
     total = len(player_ids)
     for i, (name, pid) in enumerate(player_ids.items(), 1):
         log.info("  gamelog [%d/%d] %s", i, total, name)
         try:
-            df = fetch_player_gamelog(pid, name)
+            df, po = fetch_player_gamelogs_both(pid, name)
+            if not po.empty:
+                playoff_frames.append(po)
             if not df.empty:
                 frames.append(df)
             else:
@@ -214,7 +245,8 @@ def fetch_all_gamelogs(player_ids: dict[str, str]) -> tuple[pd.DataFrame, list[s
             log.warning("  Skipping %s (%s): %s", name, pid, e)
             skipped.append(name)
     result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    return result, skipped
+    playoffs = pd.concat(playoff_frames, ignore_index=True) if playoff_frames else pd.DataFrame()
+    return result, playoffs, skipped
 
 
 def fetch_team_standings() -> pd.DataFrame:
@@ -227,8 +259,93 @@ def fetch_team_standings() -> pd.DataFrame:
         try:
             df = _get_table(url, table_id, sleep=1.5)
             if "W" in df.columns and "L" in df.columns:
+                # bref marks playoff teams with a trailing '*' — keep it as a flag,
+                # not part of the name, so name → abbreviation lookups still work.
+                if "Team" in df.columns:
+                    df["Playoffs"] = df["Team"].astype(str).str.strip().str.endswith("*")
+                    df["Team"] = df["Team"].map(clean_team_name)
                 df["SEASON"] = CURRENT_SEASON
                 return df
         except Exception:
             continue
     return pd.DataFrame()
+
+
+# ── Playoffs ──────────────────────────────────────────────────────────────────
+
+def _abbrev_from_href(href: str) -> str:
+    # /wnba/teams/NYL/2026.html → NYL
+    parts = href.strip("/").split("/")
+    return parts[2] if len(parts) >= 3 and parts[1] == "teams" else ""
+
+
+def fetch_playoff_series() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Parses the playoffs bracket on the season page.
+    Returns (series_df, games_df):
+      series_df — one row per series: Round, Team A/B (abbrevs), wins, status text
+      games_df  — one row per scheduled game: series id, game #, date, away/home, scores
+    Unplayed games have NaN scores.
+    """
+    url = f"{BASE_URL}/years/{CURRENT_SEASON}.html"
+    time.sleep(1.5)
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    table = _find_table(resp.content.decode("utf-8", errors="replace"), "all_playoffs")
+    if table is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    series_rows, game_rows = [], []
+    current = None
+    for tr in table.find_all("tr"):
+        if "toggleable" in (tr.get("class") or []):
+            continue  # nested copy of the game rows below it
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"], recursive=False)]
+        if not cells or not cells[0]:
+            continue
+        links = [a.get("href", "") for a in tr.find_all("a")]
+        team_links = [_abbrev_from_href(h) for h in links if "/teams/" in h]
+
+        if not cells[0].startswith("Game") and len(team_links) >= 2:
+            # Series header, e.g. ["Semifinals", "New York Liberty trail Atlanta Dream (0-1)", "Series Stats"]
+            series_link = next((h for h in links if "/playoffs/" in h), "")
+            current = {
+                "series_id": series_link.rstrip("/").split("/")[-1].replace(".html", "") or f"S{len(series_rows)}",
+                "Round": cells[0],
+                "Leader": team_links[0],
+                "Trailer": team_links[1],
+                "Status": cells[1] if len(cells) > 1 else "",
+                "SEASON": CURRENT_SEASON,
+            }
+            series_rows.append(current)
+        elif cells[0].startswith("Game") and current is not None:
+            # ["Game 1", "Sun, October 4", "New York Liberty", "82", "@ Atlanta Dream", "92"]
+            # Unplayed: ["Game 2", "Wed, October 7", "New York Liberty", "@ Atlanta Dream"]
+            if len(team_links) < 2:
+                continue
+            nums = [c for c in cells[2:] if c.isdigit()]
+            box = next((h for h in links if "/boxscores/" in h), "")
+            game_rows.append({
+                "series_id": current["series_id"],
+                "Game": int(cells[0].split()[-1]),
+                "Date": cells[1],
+                "Away": team_links[0],
+                "Home": team_links[1],
+                "AwayPts": int(nums[0]) if len(nums) == 2 else None,
+                "HomePts": int(nums[1]) if len(nums) == 2 else None,
+                "Boxscore": box,
+                "SEASON": CURRENT_SEASON,
+            })
+
+    series = pd.DataFrame(series_rows)
+    games = pd.DataFrame(game_rows)
+    if not series.empty and not games.empty:
+        # Compute wins from scores rather than parsing the status sentence
+        played = games.dropna(subset=["AwayPts", "HomePts"]).copy()
+        played["Winner"] = played.apply(
+            lambda r: r["Home"] if r["HomePts"] > r["AwayPts"] else r["Away"], axis=1)
+        wins = played.groupby(["series_id", "Winner"]).size()
+        series["LeaderWins"] = [int(wins.get((sid, t), 0)) for sid, t in zip(series["series_id"], series["Leader"])]
+        series["TrailerWins"] = [int(wins.get((sid, t), 0)) for sid, t in zip(series["series_id"], series["Trailer"])]
+        series["Complete"] = series["Status"].str.contains(r"\bover\b|\bdefeated\b", regex=True)
+    return series, games

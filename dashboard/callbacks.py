@@ -6,7 +6,7 @@ from dash import Input, Output, dash_table, html
 from dash.exceptions import PreventUpdate
 
 from data.store import load
-from data.teams import TEAM_COLORS, TEAM_NAMES
+from data.teams import TEAM_COLORS, TEAM_LOGOS, TEAM_NAMES, clean_team_name, team_abbrev
 
 GOLD = "#f5a623"
 BLUE = "#4a90d9"
@@ -42,10 +42,12 @@ def _load_per_game() -> pd.DataFrame:
 
 def register_callbacks(app) -> None:
 
-    from dashboard.layout import standings_layout, league_layout, player_layout, team_layout, scatter_layout, game_scatter_layout, durability_layout
+    from dashboard.layout import standings_layout, playoffs_layout, league_layout, player_layout, team_layout, scatter_layout, game_scatter_layout, durability_layout
 
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def render_page(pathname):
+        if pathname == "/playoffs":
+            return playoffs_layout()
         if pathname == "/league":
             return league_layout()
         if pathname == "/player":
@@ -105,6 +107,7 @@ def register_callbacks(app) -> None:
     @app.callback(
         Output("standings-chart", "figure"),
         Output("standings-table", "children"),
+        Output("standings-banner", "children"),
         Input("url", "pathname"),
     )
     def update_standings(pathname):
@@ -113,12 +116,20 @@ def register_callbacks(app) -> None:
         standings = load("team_standings")
         if standings.empty:
             empty = _empty_fig("No standings data yet — run the nightly refresh.")
-            return empty, ""
+            return empty, "", ""
         gamelogs = load("player_gamelogs")
         last10 = _compute_last10(gamelogs)
+        series = load("playoff_series")
         chart = _standings_chart(standings)
-        table = _standings_table(standings, last10)
-        return chart, table
+        table = _standings_table(standings, last10, _postseason_status(series))
+        banner = ""
+        if _season_complete(standings):
+            banner = dbc.Alert(
+                ["Regular season complete — final standings. ",
+                 html.A("See the playoff bracket →", href="/playoffs", className="alert-link")],
+                color="info", className="py-2",
+            )
+        return chart, table, banner
 
     @app.callback(
         Output("standings-winpct-chart", "figure"),
@@ -132,6 +143,44 @@ def register_callbacks(app) -> None:
         if gamelogs.empty:
             return _empty_fig("No game log data yet — run the nightly refresh.")
         return _winpct_trend_chart(gamelogs, selected_teams or [])
+
+    # ── Playoffs view ─────────────────────────────────────────────────────────
+    @app.callback(
+        Output("playoffs-bracket", "children"),
+        Output("playoffs-summary", "children"),
+        Input("url", "pathname"),
+    )
+    def update_playoffs_bracket(pathname):
+        if pathname != "/playoffs":
+            raise PreventUpdate
+        series = load("playoff_series")
+        if series.empty:
+            return dbc.Alert("No playoff data yet — the bracket appears once the postseason starts.",
+                             color="secondary"), ""
+        games = load("playoff_games")
+        seeds = _playoff_seeds(load("team_standings"))
+        return _playoff_bracket(series, games, seeds), _playoff_summary(series)
+
+    @app.callback(
+        Output("playoffs-leaders-chart", "figure"),
+        Output("playoffs-leaders-table", "children"),
+        Input("url", "pathname"),
+        Input("playoffs-stat", "value"),
+        Input("playoffs-alive-only", "value"),
+    )
+    def update_playoff_leaders(pathname, stat, alive_only):
+        if pathname != "/playoffs":
+            raise PreventUpdate
+        logs = load("player_playoff_gamelogs")
+        if logs.empty:
+            return _empty_fig("No playoff game logs yet."), ""
+        agg = _playoff_player_averages(logs)
+        if alive_only:
+            alive = _teams_alive(load("playoff_series"))
+            if alive:
+                agg = agg[agg["Team"].isin(alive)]
+        stat = stat or "PTS"
+        return _playoff_leaders_chart(agg, stat), _playoff_leaders_table(agg, stat)
 
     # ── League view ───────────────────────────────────────────────────────────
     @app.callback(
@@ -495,12 +544,11 @@ def _team_win_pcts() -> dict[str, float]:
     standings = load("team_standings")
     if standings.empty:
         return {}
-    # Standings uses full names; gamelogs use abbreviations — invert TEAM_NAMES to map back
-    name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
+    # Standings uses full names; gamelogs use abbreviations
     result = {}
     for _, row in standings.iterrows():
-        full_name = str(row.get("Team", row.get("Tm", ""))).strip()
-        abbrev = name_to_abbrev.get(full_name, full_name)
+        full_name = clean_team_name(row.get("Team", row.get("Tm", "")))
+        abbrev = team_abbrev(full_name, full_name)
         wpct = pd.to_numeric(row.get("W/L%"), errors="coerce")
         if pd.isna(wpct):
             w = pd.to_numeric(row.get("W"), errors="coerce")
@@ -1114,7 +1162,7 @@ def _winpct_trend_chart(gamelogs: pd.DataFrame, selected_teams: list) -> go.Figu
     return fig
 
 
-TOTAL_SEASON_GAMES = 40
+TOTAL_SEASON_GAMES = 44  # 2026: 15 teams, 44-game schedule
 PLAYOFF_SPOTS = 8
 HCA_SPOTS = 4
 
@@ -1127,9 +1175,9 @@ def _standings_prep(standings: pd.DataFrame):
     df["L"] = pd.to_numeric(df["L"], errors="coerce")
     df = df.dropna(subset=["W", "L"]).reset_index(drop=True)
 
-    # Map full team name → abbreviation
-    name_to_abbrev = {v: k for k, v in TEAM_NAMES.items()}
-    df["Abbrev"] = df["Team"].map(name_to_abbrev).fillna(df["Team"])
+    # Map full team name → abbreviation (older snapshots still carry bref's playoff '*')
+    df["Team"] = df["Team"].map(clean_team_name)
+    df["Abbrev"] = df["Team"].map(lambda t: team_abbrev(t, t))
     df["Color"] = df["Abbrev"].map(TEAM_COLORS).fillna(BLUE)
 
     df["GP"] = df["W"] + df["L"]
@@ -1201,9 +1249,36 @@ def _standings_prep(standings: pd.DataFrame):
     return df
 
 
+def _season_complete(standings: pd.DataFrame) -> bool:
+    df = _standings_prep(standings)
+    return not df.empty and bool((df["Remaining"] == 0).all())
+
+
+def _postseason_status(series: pd.DataFrame) -> dict[str, str]:
+    """{abbrev: 'Won Finals' | 'Lost Semifinals' | 'Semifinals (1-2)' …} from playoff_series."""
+    if series.empty:
+        return {}
+    out: dict[str, str] = {}
+    # Process earliest round first so later rounds overwrite
+    order = {"First Round": 0, "Semifinals": 1, "Finals": 2}
+    series = series.assign(_r=series["Round"].map(order).fillna(9)).sort_values("_r")
+    for _, r in series.iterrows():
+        lead, trail = r["Leader"], r["Trailer"]
+        lw, tw = int(r.get("LeaderWins", 0) or 0), int(r.get("TrailerWins", 0) or 0)
+        rnd = r["Round"]
+        if bool(r.get("Complete")):
+            out[lead] = "Won Finals 🏆" if rnd == "Finals" else f"Won {rnd}"
+            out[trail] = f"Lost {rnd}"
+        else:
+            out[lead] = f"{rnd} ({lw}-{tw})"
+            out[trail] = f"{rnd} ({tw}-{lw})"
+    return out
+
+
 def _standings_chart(standings: pd.DataFrame) -> go.Figure:
     df = _standings_prep(standings)
     n = len(df)
+    complete = bool((df["Remaining"] == 0).all())
 
     # Plotly horizontal bars: sort ascending so best team renders at top
     df_asc = df.iloc[::-1].reset_index(drop=True)
@@ -1250,21 +1325,22 @@ def _standings_chart(standings: pd.DataFrame) -> go.Figure:
         xanchor="right", yanchor="bottom",
         font=dict(color=GOLD, size=11),
     )
-    fig.add_shape(
-        type="line", x0=0, x1=1, xref="paper",
-        y0=hca_y, y1=hca_y,
-        line=dict(color="#6ec6e6", width=1.5, dash="dot"),
-    )
-    fig.add_annotation(
-        x=1, xref="paper", y=hca_y, yref="y",
-        text="Home court cutoff", showarrow=False,
-        xanchor="right", yanchor="bottom",
-        font=dict(color="#6ec6e6", size=11),
-    )
+    if not complete:
+        fig.add_shape(
+            type="line", x0=0, x1=1, xref="paper",
+            y0=hca_y, y1=hca_y,
+            line=dict(color="#6ec6e6", width=1.5, dash="dot"),
+        )
+        fig.add_annotation(
+            x=1, xref="paper", y=hca_y, yref="y",
+            text="Home court cutoff", showarrow=False,
+            xanchor="right", yanchor="bottom",
+            font=dict(color="#6ec6e6", size=11),
+        )
 
     fig.update_layout(
         barmode="stack",
-        title="2026 WNBA Standings",
+        title="2026 WNBA Final Regular-Season Standings" if complete else "2026 WNBA Standings",
         xaxis_title="Games",
         xaxis=dict(range=[0, TOTAL_SEASON_GAMES + 1]),
         template="plotly_dark",
@@ -1275,12 +1351,24 @@ def _standings_chart(standings: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def _standings_table(standings: pd.DataFrame, last10: dict | None = None):
+def _standings_table(standings: pd.DataFrame, last10: dict | None = None,
+                     postseason: dict | None = None):
     df = _standings_prep(standings)
+    complete = bool((df["Remaining"] == 0).all())
 
     df["Last 10"] = df["Abbrev"].map(last10 or {}).fillna("—")
-    df = df.rename(columns={"Clinch Playoffs": "Wins to Clinch Playoffs", "Clinch HCA": "Wins to Clinch HCA"})
-    display = df[["Team", "W", "L", "W/L%", "GB", "Last 10", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]].copy()
+    if complete:
+        # Clinch math is moot once every game is played — show seeds and playoff results
+        df["Seed"] = [str(i) if i <= PLAYOFF_SPOTS else "—" for i in range(1, len(df) + 1)]
+        df["Postseason"] = [
+            (postseason or {}).get(a, "Missed playoffs" if i >= PLAYOFF_SPOTS else "—")
+            for i, a in enumerate(df["Abbrev"])
+        ]
+        extra_cols = ["Seed", "Postseason"]
+    else:
+        df = df.rename(columns={"Clinch Playoffs": "Wins to Clinch Playoffs", "Clinch HCA": "Wins to Clinch HCA"})
+        extra_cols = ["Wins to Clinch Playoffs", "Wins to Clinch HCA"]
+    display = df[["Team", "W", "L", "W/L%", "GB", "Last 10"] + extra_cols].copy()
     display.insert(0, "#", range(1, len(df) + 1))
     display["W/L%"] = display["W/L%"].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "—")
 
@@ -1310,7 +1398,8 @@ def _standings_table(standings: pd.DataFrame, last10: dict | None = None):
         style_cell={"textAlign": "left", "padding": "8px 12px"},
         style_cell_conditional=[
             {"if": {"column_id": c}, "textAlign": "center"}
-            for c in ["#", "W", "L", "W/L%", "GB", "Last 10", "Wins to Clinch Playoffs", "Wins to Clinch HCA"]
+            for c in ["#", "W", "L", "W/L%", "GB", "Last 10", "Seed", "Postseason",
+                      "Wins to Clinch Playoffs", "Wins to Clinch HCA"]
         ],
         page_size=20,
     )
@@ -1332,5 +1421,207 @@ def _summary_table(df: pd.DataFrame):
         style_data_conditional=[
             {"if": {"row_index": "odd"}, "backgroundColor": "#181b28"}
         ],
+        page_size=20,
+    )
+
+
+# ── Playoffs helpers ──────────────────────────────────────────────────────────
+
+PLAYOFF_ROUNDS = ["First Round", "Semifinals", "Finals"]
+# Bracket slot for each seed so the tree lines up: (1v8, 4v5) feed one semi, (3v6, 2v7) the other
+_SEED_SLOT = {1: 0, 8: 0, 4: 1, 5: 1, 3: 2, 6: 2, 2: 3, 7: 3}
+
+
+def _playoff_seeds(standings: pd.DataFrame) -> dict[str, int]:
+    if standings.empty:
+        return {}
+    df = _standings_prep(standings)
+    return {a: i + 1 for i, a in enumerate(df["Abbrev"].head(PLAYOFF_SPOTS))}
+
+
+def _teams_alive(series: pd.DataFrame) -> set[str]:
+    if series.empty:
+        return set()
+    teams = set(series["Leader"]) | set(series["Trailer"])
+    losers = set(series.loc[series["Complete"].astype(bool), "Trailer"])
+    return teams - losers
+
+
+def _playoff_summary(series: pd.DataFrame) -> str:
+    alive = _teams_alive(series)
+    finals = series[series["Round"] == "Finals"]
+    if not finals.empty and bool(finals.iloc[0]["Complete"]):
+        champ = finals.iloc[0]["Leader"]
+        return f"🏆 {TEAM_NAMES.get(champ, champ)} are the 2026 WNBA champions."
+    in_progress = series[~series["Complete"].astype(bool)]
+    rnd = in_progress["Round"].iloc[0] if not in_progress.empty else series["Round"].iloc[0]
+    names = ", ".join(sorted(TEAM_NAMES.get(t, t) for t in alive))
+    return f"{rnd} in progress · {len(alive)} teams alive: {names}"
+
+
+def _short_date(d: str) -> str:
+    # "Sun, October 4" → "Sun Oct 4"
+    try:
+        dow, rest = d.split(", ", 1)
+        month, day = rest.split()
+        return f"{dow} {month[:3]} {day}"
+    except ValueError:
+        return d
+
+
+def _series_card(row, games: pd.DataFrame, seeds: dict[str, int], best_of: int):
+    sid = row["series_id"]
+    g = games[games["series_id"] == sid].sort_values("Game") if not games.empty else games
+    lw, tw = int(row.get("LeaderWins", 0) or 0), int(row.get("TrailerWins", 0) or 0)
+    complete = bool(row.get("Complete"))
+    to_win = best_of // 2 + 1
+
+    # Show the higher seed on top
+    teams = [(row["Leader"], lw), (row["Trailer"], tw)]
+    teams.sort(key=lambda t: seeds.get(t[0], 99))
+
+    def team_row(abbrev, wins):
+        won_series = complete and wins == to_win
+        eliminated = complete and not won_series
+        return html.Div([
+            html.Img(src=TEAM_LOGOS.get(abbrev, ""), style={"height": "28px", "width": "28px",
+                                                             "objectFit": "contain"}, className="me-2"),
+            html.Span(str(seeds.get(abbrev, "")), className="text-muted me-2",
+                      style={"fontSize": "0.8em", "width": "12px", "display": "inline-block"}),
+            html.Span(TEAM_NAMES.get(abbrev, abbrev),
+                      style={"fontWeight": "700" if won_series else "500",
+                             "flex": "1", "opacity": 0.45 if eliminated else 1}),
+            html.Span(str(wins), style={"fontSize": "1.4em", "fontWeight": "700",
+                                        "color": GOLD if won_series else ("#666" if eliminated else "white")}),
+        ], className="d-flex align-items-center py-1")
+
+    game_lines = []
+    for _, gm in g.iterrows():
+        played = pd.notna(gm.get("AwayPts")) and pd.notna(gm.get("HomePts"))
+        if complete and not played:
+            continue
+        if played:
+            ap, hp = int(gm["AwayPts"]), int(gm["HomePts"])
+            away = html.B(f"{gm['Away']} {ap}") if ap > hp else html.Span(f"{gm['Away']} {ap}")
+            home = html.B(f"{gm['Home']} {hp}") if hp > ap else html.Span(f"{gm['Home']} {hp}")
+            body = [away, " @ ", home]
+            cls = ""
+        else:
+            # A game is only needed if neither team can have clinched before it
+            needed_by = (lw + tw) + (to_win - max(lw, tw))
+            tag = " (if nec.)" if int(gm["Game"]) > needed_by else ""
+            body = [f"{gm['Away']} @ {gm['Home']}{tag}"]
+            cls = "text-muted"
+        game_lines.append(html.Div(
+            [html.Span(f"G{int(gm['Game'])} · {_short_date(str(gm['Date']))} · ", className="text-muted")] + body,
+            className=cls, style={"fontSize": "0.8em"},
+        ))
+
+    return dbc.Card(dbc.CardBody([
+        team_row(*teams[0]),
+        team_row(*teams[1]),
+        html.Div(row.get("Status", ""), className="text-info mt-1 mb-2", style={"fontSize": "0.85em"}),
+        html.Div(game_lines),
+    ]), className="mb-3", style={"backgroundColor": "#1a1d2b", "border": "1px solid #2a2e40"})
+
+
+def _tbd_card(label: str):
+    return dbc.Card(dbc.CardBody(html.Div(label, className="text-muted text-center py-3")),
+                    className="mb-3",
+                    style={"backgroundColor": "#14161f", "border": "1px dashed #2a2e40"})
+
+
+def _playoff_bracket(series: pd.DataFrame, games: pd.DataFrame, seeds: dict[str, int]):
+    def slot(r):
+        return min(_SEED_SLOT.get(seeds.get(r["Leader"], 0), 9), _SEED_SLOT.get(seeds.get(r["Trailer"], 0), 9))
+
+    expected = {"First Round": 4, "Semifinals": 2, "Finals": 1}
+    cols = []
+    for rnd in PLAYOFF_ROUNDS:
+        rs = series[series["Round"] == rnd]
+        # A sweep lists fewer games, so take the longest series in the round
+        n = games[games["series_id"].isin(rs["series_id"])]["Game"].max() if not games.empty else None
+        best_of = int(n) if pd.notna(n) else 1
+        done = rs[rs["Complete"].astype(bool)] if not rs.empty else rs
+        if not done.empty:  # winner's win total pins the length even if every series was a sweep
+            best_of = max(best_of, 2 * int(done[["LeaderWins", "TrailerWins"]].max().max()) - 1)
+        cards = [_series_card(r, games, seeds, best_of)
+                 for _, r in sorted(rs.iterrows(), key=lambda kv: slot(kv[1]))]
+        while len(cards) < expected[rnd]:
+            cards.append(_tbd_card("Awaiting " + ("semifinal winners" if rnd == "Finals" else "first round")))
+        cols.append(dbc.Col([
+            html.H5(rnd + (f" · best of {best_of}" if not rs.empty else ""), className="mb-3"),
+            # Spread later-round cards vertically so the bracket reads as a tree
+            html.Div(cards, className="d-flex flex-column justify-content-around h-100"),
+        ], lg=4, md=12))
+    return dbc.Row(cols, className="g-4")
+
+
+def _playoff_player_averages(logs: pd.DataFrame) -> pd.DataFrame:
+    df = logs.copy()
+    num = ["MP", "FG", "FGA", "3P", "3PA", "FT", "FTA", "TRB", "AST", "STL", "BLK", "TOV", "PTS", "GmSc"]
+    for c in num:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    grp = df.groupby(["Player", "Tm"])
+    agg = grp[[c for c in num if c in df.columns]].mean()
+    tot = grp[["FG", "FGA", "3P", "3PA", "FT", "FTA", "PTS"]].sum()
+    agg["G"] = grp.size()
+    agg["W-L"] = grp["Result"].apply(lambda r: f"{(r == 'W').sum()}-{(r == 'L').sum()}")
+    agg["FG%"] = tot["FG"] / tot["FGA"].where(tot["FGA"] > 0)
+    agg["3P%"] = tot["3P"] / tot["3PA"].where(tot["3PA"] > 0)
+    agg["FT%"] = tot["FT"] / tot["FTA"].where(tot["FTA"] > 0)
+    tsa = 2 * (tot["FGA"] + 0.44 * tot["FTA"])
+    agg["TS%"] = tot["PTS"] / tsa.where(tsa > 0)
+    agg = agg.reset_index().rename(columns={"Tm": "Team"})
+    return agg
+
+
+def _playoff_leaders_chart(agg: pd.DataFrame, stat: str) -> go.Figure:
+    df = agg.copy()
+    if stat in ("TS%",):
+        df = df[df["MP"] >= 15]  # avoid tiny-sample efficiency outliers
+    df = df.dropna(subset=[stat]).sort_values(stat, ascending=False).head(15).iloc[::-1]
+    if df.empty:
+        return _empty_fig("No playoff data for this stat.")
+    is_pct = stat.endswith("%")
+    label = {"TS%": "True Shooting %", "GmSc": "Game Score"}.get(stat, STAT_LABELS.get(stat, stat))
+    hovers = [
+        f"<b>{r['Player']}</b> · {r['Team']}<br>{int(r['G'])} GP ({r['W-L']}) · "
+        f"{label}: {r[stat]:.1%}" if is_pct else
+        f"<b>{r['Player']}</b> · {r['Team']}<br>{int(r['G'])} GP ({r['W-L']}) · {label}: {r[stat]:.1f}"
+        for _, r in df.iterrows()
+    ]
+    fig = go.Figure(go.Bar(
+        x=df[stat], y=df["Player"], orientation="h",
+        marker_color=[TEAM_COLORS.get(t, BLUE) for t in df["Team"]],
+        hovertext=hovers, hovertemplate="%{hovertext}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=f"Top 15 — {label}" + (" (15+ MPG)" if stat == "TS%" else ""),
+        xaxis_tickformat=".0%" if is_pct else "",
+        template="plotly_dark", height=520, margin=dict(l=160),
+    )
+    return fig
+
+
+def _playoff_leaders_table(agg: pd.DataFrame, stat: str):
+    cols = ["Player", "Team", "G", "W-L", "MP", "PTS", "TRB", "AST", "STL", "BLK", "TOV",
+            "FG%", "3P%", "FT%", "TS%", "GmSc"]
+    display = agg.sort_values(stat, ascending=False)[[c for c in cols if c in agg.columns]].copy()
+    for c in ["MP", "PTS", "TRB", "AST", "STL", "BLK", "TOV", "GmSc"]:
+        if c in display.columns:
+            display[c] = display[c].round(1)
+    for c in ["FG%", "3P%", "FT%", "TS%"]:
+        if c in display.columns:
+            display[c] = display[c].round(3)
+    return dash_table.DataTable(
+        data=display.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in display.columns],
+        sort_action="native",
+        style_table={"overflowX": "auto"},
+        style_header={"backgroundColor": "#1e2130", "color": "white", "fontWeight": "bold"},
+        style_data={"backgroundColor": "#13161f", "color": "white"},
+        style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#181b28"}],
         page_size=20,
     )

@@ -13,7 +13,10 @@ DB_PATH = Path(__file__).parent.parent / "data" / "wnba.db"
 log = logging.getLogger(__name__)
 
 # Tables that get backed up before each nightly run and restored on fatal failure.
-BACKED_UP_TABLES = ["player_per_game", "player_gamelogs", "team_standings", "player_totals"]
+BACKED_UP_TABLES = [
+    "player_per_game", "player_gamelogs", "team_standings", "player_totals",
+    "player_playoff_gamelogs", "playoff_series", "playoff_games",
+]
 
 
 def _conn() -> sqlite3.Connection:

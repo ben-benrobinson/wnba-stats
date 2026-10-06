@@ -60,3 +60,15 @@ TEAM_NAMES: dict[str, str] = {
     "TOR": "Toronto Tempo",
     "WAS": "Washington Mystics",
 }
+
+_NAME_TO_ABBREV = {v: k for k, v in TEAM_NAMES.items()}
+
+
+def clean_team_name(name) -> str:
+    """bref appends '*' to playoff teams in standings ('Minnesota Lynx*')."""
+    return str(name).strip().rstrip("*").strip()
+
+
+def team_abbrev(name, default: str = "") -> str:
+    """Full team name (with or without bref's playoff '*') → abbreviation."""
+    return _NAME_TO_ABBREV.get(clean_team_name(name), default)
