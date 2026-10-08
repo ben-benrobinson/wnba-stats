@@ -89,22 +89,29 @@ def run():
         log.warning("  No game log data returned")
     if skipped:
         log.warning("  %d player(s) skipped: %s", len(skipped), ", ".join(sorted(skipped)))
-    if not playoff_gamelogs.empty:
-        save(playoff_gamelogs, "player_playoff_gamelogs")
-        log.info("  %d playoff game rows across %d players",
-                 len(playoff_gamelogs), playoff_gamelogs["Player"].nunique())
-
-    log.info("Fetching playoff bracket...")
+    # Playoffs: ESPN is fresher (minutes vs. hours); bref is the fallback
+    log.info("Refreshing playoffs from ESPN...")
     try:
-        series, playoff_games = fetch_playoff_series()
-        if not series.empty:
-            save(series, "playoff_series")
-            save(playoff_games, "playoff_games")
-            log.info("  %d series, %d games", len(series), len(playoff_games))
-        else:
-            log.info("  No playoff bracket yet")
+        from data.espn import refresh_playoffs
+        log.info("  %s", refresh_playoffs())
     except Exception as e:
-        log.warning("  Playoff bracket fetch failed: %s", e)
+        log.warning("  ESPN playoff refresh failed (%s) — falling back to basketball-reference", e)
+        from data.store import set_refresh_meta
+        if not playoff_gamelogs.empty:
+            save(playoff_gamelogs, "player_playoff_gamelogs")
+            log.info("  %d playoff game rows across %d players",
+                     len(playoff_gamelogs), playoff_gamelogs["Player"].nunique())
+        try:
+            series, playoff_games = fetch_playoff_series()
+            if not series.empty:
+                save(series, "playoff_series")
+                save(playoff_games, "playoff_games")
+                set_refresh_meta("playoffs", "basketball-reference", run_ts)
+                log.info("  %d series, %d games", len(series), len(playoff_games))
+            else:
+                log.info("  No playoff bracket yet")
+        except Exception as e2:
+            log.warning("  bref playoff bracket fetch failed too: %s", e2)
 
     # ── 3. Targeted retry for players missing from gamelogs ───────────────────
     players_retried = []

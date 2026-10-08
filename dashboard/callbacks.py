@@ -159,7 +159,9 @@ def register_callbacks(app) -> None:
                              color="secondary"), ""
         games = load("playoff_games")
         seeds = _playoff_seeds(load("team_standings"))
-        return _playoff_bracket(series, games, seeds), _playoff_summary(series)
+        summary = [html.Div(_playoff_summary(series)),
+                   html.Small(_refresh_note(), style={"fontSize": "0.8em"})]
+        return _playoff_bracket(series, games, seeds), summary
 
     @app.callback(
         Output("playoffs-leaders-chart", "figure"),
@@ -1264,6 +1266,8 @@ def _postseason_status(series: pd.DataFrame) -> dict[str, str]:
     series = series.assign(_r=series["Round"].map(order).fillna(9)).sort_values("_r")
     for _, r in series.iterrows():
         lead, trail = r["Leader"], r["Trailer"]
+        if "TBD" in (lead, trail):
+            continue  # future round, matchup not set yet
         lw, tw = int(r.get("LeaderWins", 0) or 0), int(r.get("TrailerWins", 0) or 0)
         rnd = r["Round"]
         if bool(r.get("Complete")):
@@ -1444,7 +1448,7 @@ def _teams_alive(series: pd.DataFrame) -> set[str]:
         return set()
     teams = set(series["Leader"]) | set(series["Trailer"])
     losers = set(series.loc[series["Complete"].astype(bool), "Trailer"])
-    return teams - losers
+    return teams - losers - {"TBD"}
 
 
 def _playoff_summary(series: pd.DataFrame) -> str:
@@ -1457,6 +1461,21 @@ def _playoff_summary(series: pd.DataFrame) -> str:
     rnd = in_progress["Round"].iloc[0] if not in_progress.empty else series["Round"].iloc[0]
     names = ", ".join(sorted(TEAM_NAMES.get(t, t) for t in alive))
     return f"{rnd} in progress · {len(alive)} teams alive: {names}"
+
+
+def _refresh_note() -> str:
+    from data.store import get_refresh_meta
+    meta = get_refresh_meta("playoffs")
+    if not meta:
+        return ""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        ts = datetime.fromisoformat(meta["updated"]).astimezone(ZoneInfo("America/New_York"))
+        when = ts.strftime("%b %-d, %-I:%M %p ET")
+    except Exception:
+        when = str(meta.get("updated", ""))[:16]
+    return f"Updated {when} · source: {meta.get('source', '')}"
 
 
 def _short_date(d: str) -> str:
@@ -1500,17 +1519,27 @@ def _series_card(row, games: pd.DataFrame, seeds: dict[str, int], best_of: int):
         played = pd.notna(gm.get("AwayPts")) and pd.notna(gm.get("HomePts"))
         if complete and not played:
             continue
-        if played:
+        live = gm.get("State") == "live"
+        if live:
+            ap, hp = int(gm["AwayPts"]), int(gm["HomePts"])
+            body = [html.Span("LIVE ", style={"color": "#e74c3c", "fontWeight": "700"}),
+                    f"{gm['Away']} {ap} @ {gm['Home']} {hp}",
+                    html.Span(f" · {gm.get('Detail', '')}", className="text-muted")]
+            cls = ""
+        elif played:
             ap, hp = int(gm["AwayPts"]), int(gm["HomePts"])
             away = html.B(f"{gm['Away']} {ap}") if ap > hp else html.Span(f"{gm['Away']} {ap}")
             home = html.B(f"{gm['Home']} {hp}") if hp > ap else html.Span(f"{gm['Home']} {hp}")
             body = [away, " @ ", home]
             cls = ""
         else:
-            # A game is only needed if neither team can have clinched before it
-            needed_by = (lw + tw) + (to_win - max(lw, tw))
-            tag = " (if nec.)" if int(gm["Game"]) > needed_by else ""
-            body = [f"{gm['Away']} @ {gm['Home']}{tag}"]
+            if "IfNecessary" in gm and pd.notna(gm["IfNecessary"]):
+                if_nec = bool(gm["IfNecessary"])
+            else:
+                # A game is only needed if neither team can have clinched before it
+                if_nec = int(gm["Game"]) > (lw + tw) + (to_win - max(lw, tw))
+            tip = f" · {gm['Tip']}" if pd.notna(gm.get("Tip")) and gm.get("Tip") else ""
+            body = [f"{gm['Away']} @ {gm['Home']}{tip}{' (if nec.)' if if_nec else ''}"]
             cls = "text-muted"
         game_lines.append(html.Div(
             [html.Span(f"G{int(gm['Game'])} · {_short_date(str(gm['Date']))} · ", className="text-muted")] + body,
@@ -1545,8 +1574,11 @@ def _playoff_bracket(series: pd.DataFrame, games: pd.DataFrame, seeds: dict[str,
         done = rs[rs["Complete"].astype(bool)] if not rs.empty else rs
         if not done.empty:  # winner's win total pins the length even if every series was a sweep
             best_of = max(best_of, 2 * int(done[["LeaderWins", "TrailerWins"]].max().max()) - 1)
-        cards = [_series_card(r, games, seeds, best_of)
-                 for _, r in sorted(rs.iterrows(), key=lambda kv: slot(kv[1]))]
+        cards = [
+            _tbd_card(f"Awaiting semifinal winners · {r['Status']}")
+            if "TBD" in (r["Leader"], r["Trailer"]) else _series_card(r, games, seeds, best_of)
+            for _, r in sorted(rs.iterrows(), key=lambda kv: slot(kv[1]))
+        ]
         while len(cards) < expected[rnd]:
             cards.append(_tbd_card("Awaiting " + ("semifinal winners" if rnd == "Finals" else "first round")))
         cols.append(dbc.Col([

@@ -128,3 +128,21 @@ def load_data_quality() -> dict | None:
             return row
         except Exception:
             return None
+
+
+def set_refresh_meta(key: str, source: str, updated: str) -> None:
+    """Record when a dataset was last refreshed and from where (one row per key)."""
+    meta = load("refresh_meta")
+    row = pd.DataFrame([{"key": key, "source": source, "updated": updated}])
+    if not meta.empty and "key" in meta.columns:
+        meta = meta[meta["key"] != key]
+        row = pd.concat([meta, row], ignore_index=True)
+    save(row, "refresh_meta")
+
+
+def get_refresh_meta(key: str) -> dict | None:
+    meta = load("refresh_meta")
+    if meta.empty or "key" not in meta.columns:
+        return None
+    hit = meta[meta["key"] == key]
+    return hit.iloc[0].to_dict() if not hit.empty else None
